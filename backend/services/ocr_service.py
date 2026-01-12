@@ -1,21 +1,21 @@
 """
-OCR Service - FINAL PRODUCTION VERSION
-=======================================
-Based on actual Chandra source code analysis:
+OCR Service - MEMORY OPTIMIZED FOR 8GB RAM
+===========================================
+Implements ALL 11 memory optimization fixes:
 
-CHANDRA INTERNALS (from .venv/Lib/site-packages/chandra/):
-- Uses Qwen3VLForConditionalGeneration (NOT Qwen2VL)
-- Uses Qwen3VLProcessor (NOT AutoProcessor)
-- hf.py line 31: inputs.to("cuda") - HARDCODED CUDA
-- load_model() uses device_map="auto"
-- Settings.TORCH_DEVICE can override device
+#1: Model unloads after each request (load-on-demand)
+#2: torch.float16 instead of float32 (50% memory reduction)
+#3: device_map='auto' with max_memory + offload_folder
+#4: max_memory={'cpu': '4GB'} to limit RAM usage
+#5: max_new_tokens=512 with cache management
+#6: Complete tensor cleanup (ALL intermediate variables)
+#7: Memory monitoring with forced cleanup at 80% RAM
+#8: low_cpu_mem_usage=True + max_memory combined
+#9: Immediate deletion of image copies
+#10: Enhanced cleanup with PyTorch-specific commands
+#11: BONUS: 4-bit quantization option for extreme constraints
 
-PROBLEM: 8GB RAM + CPU-only cannot use standard InferenceManager.
-SOLUTION: Custom CPU loader with patched generate function.
-
-Usage:
-    from services.ocr_service import ocr_service
-    result = await ocr_service.process_image(image_path)
+Target: Run Chandra OCR on 8GB RAM without crashing
 """
 
 from pathlib import Path
@@ -94,19 +94,32 @@ class DocumentOCRResult:
 
 
 # =============================================================================
-# OCR SERVICE
+# OCR SERVICE - MEMORY OPTIMIZED
 # =============================================================================
 
 class OCRService:
     """
-    Chandra OCR Service - supports GPU and CPU inference.
+    Memory-optimized Chandra OCR Service for 8GB RAM systems.
     
-    For GPU: Uses standard InferenceManager (fast)
-    For CPU: Uses custom loader with patched inference (slow but works)
+    Key optimizations:
+    - Load model on demand, unload after each request (#1)
+    - Float16 precision (#2)
+    - Disk offloading with 4GB max RAM (#3, #4)
+    - Reduced token generation (#5)
+    - Aggressive memory cleanup (#6, #10)
+    - Memory monitoring (#7)
+    - Optional 4-bit quantization (#11)
     """
     
     _instance = None
     _lock = threading.Lock()
+    
+    # Configuration
+    USE_4BIT_QUANTIZATION = False  # Set True for extreme memory constraints
+    MAX_CPU_MEMORY = "4GB"  # FIX #4: Limit RAM usage
+    MAX_NEW_TOKENS = 512  # FIX #5: Reduced from 4096
+    MEMORY_THRESHOLD = 0.80  # FIX #7: Force cleanup at 80% RAM
+    UNLOAD_AFTER_REQUEST = True  # FIX #1: Unload model after each request
     
     def __new__(cls):
         if cls._instance is None:
@@ -128,14 +141,98 @@ class OCRService:
         self._use_cpu_mode = False
         self._device = None
         
-        # Single worker for CPU mode (memory constraints)
+        # Single worker to prevent memory accumulation
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._semaphore = threading.Semaphore(1)
         
         self.max_dimension = settings.OCR_MAX_IMAGE_DIMENSION
         
+        # Offload directory for disk offloading
+        self._offload_dir = Path(settings.PROJECT_ROOT) / ".model_offload"
+        self._offload_dir.mkdir(parents=True, exist_ok=True)
+        
         self._initialized = True
-        logger.info("OCR Service initialized")
+        logger.info("OCR Service initialized (memory-optimized mode)")
+    
+    # =========================================================================
+    # FIX #7 & #10: MEMORY MONITORING & ENHANCED CLEANUP
+    # =========================================================================
+    
+    def _get_memory_usage(self) -> float:
+        """Get current memory usage as percentage."""
+        try:
+            import psutil
+            return psutil.virtual_memory().percent / 100.0
+        except ImportError:
+            return 0.5  # Assume 50% if psutil not available
+    
+    def _force_cleanup(self) -> None:
+        """
+        FIX #10: Enhanced cleanup with PyTorch-specific commands.
+        Maximizes memory reclamation.
+        """
+        import torch
+        
+        # Triple gc.collect for thorough cleanup
+        gc.collect()
+        gc.collect()
+        gc.collect()
+        
+        # PyTorch-specific cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        # Clear any cached tensors
+        if hasattr(torch, '_C') and hasattr(torch._C, '_cuda_clearCublasWorkspaces'):
+            try:
+                torch._C._cuda_clearCublasWorkspaces()
+            except:
+                pass
+        
+        # Linux-specific: trim malloc
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except:
+            pass  # Not on Linux or libc not available
+        
+        gc.collect()
+    
+    def _check_memory_and_cleanup(self) -> None:
+        """FIX #7: Check memory and force cleanup if needed."""
+        mem_usage = self._get_memory_usage()
+        if mem_usage > self.MEMORY_THRESHOLD:
+            logger.warning(f"Memory at {mem_usage*100:.1f}%, forcing cleanup...")
+            self._force_cleanup()
+            
+            # If still high, unload model
+            if self._get_memory_usage() > self.MEMORY_THRESHOLD:
+                logger.warning("Memory still high, unloading model...")
+                self._unload_model()
+    
+    # =========================================================================
+    # FIX #1: MODEL UNLOADING
+    # =========================================================================
+    
+    def _unload_model(self) -> None:
+        """FIX #1: Unload model to free memory."""
+        with self._model_lock:
+            if self._model is not None:
+                logger.info("Unloading model to free memory...")
+                del self._model
+                self._model = None
+            if self._processor is not None:
+                del self._processor
+                self._processor = None
+            if self._manager is not None:
+                del self._manager
+                self._manager = None
+            
+            self._model_loaded = False
+            self._force_cleanup()
+            logger.info("Model unloaded, memory freed")
     
     # =========================================================================
     # HARDWARE DETECTION
@@ -152,22 +249,25 @@ class OCRService:
         
         try:
             import psutil
+            ram_total = psutil.virtual_memory().total / (1024**3)
             ram_available = psutil.virtual_memory().available / (1024**3)
         except ImportError:
-            ram_available = 4.0  # Assume low
+            ram_total = 8.0
+            ram_available = 4.0
         
         return {
             'gpu_available': gpu_available,
             'gpu_memory_gb': gpu_memory,
+            'ram_total_gb': ram_total,
             'ram_available_gb': ram_available
         }
     
     # =========================================================================
-    # MODEL LOADING
+    # MODEL LOADING - MEMORY OPTIMIZED
     # =========================================================================
     
     def _ensure_model_loaded(self) -> None:
-        """Load model with appropriate strategy."""
+        """Load model with memory optimizations."""
         if self._model_loaded:
             return
         
@@ -175,15 +275,16 @@ class OCRService:
             if self._model_loaded:
                 return
             
+            # Check memory before loading
+            self._check_memory_and_cleanup()
+            
             hw = self._detect_hardware()
-            logger.info(f"Hardware: GPU={hw['gpu_available']}, GPU-MEM={hw['gpu_memory_gb']:.1f}GB, RAM={hw['ram_available_gb']:.1f}GB")
+            logger.info(f"Hardware: GPU={hw['gpu_available']}, RAM={hw['ram_available_gb']:.1f}GB available")
             
             if hw['gpu_available'] and hw['gpu_memory_gb'] >= 4:
-                # GPU path - use standard InferenceManager
                 self._load_gpu_mode()
             else:
-                # CPU path - custom loader
-                self._load_cpu_mode()
+                self._load_cpu_mode_optimized()
             
             self._model_loaded = True
     
@@ -196,77 +297,105 @@ class OCRService:
             self._manager = InferenceManager(method="hf")
             self._use_cpu_mode = False
             self._device = "cuda"
-            logger.info("GPU mode loaded successfully")
+            logger.info("GPU mode loaded")
         except Exception as e:
             logger.warning(f"GPU mode failed: {e}, falling back to CPU")
-            self._load_cpu_mode()
+            self._load_cpu_mode_optimized()
     
-    def _load_cpu_mode(self) -> None:
+    def _load_cpu_mode_optimized(self) -> None:
         """
-        Load model for CPU inference.
+        FIX #2, #3, #4, #8, #11: Memory-optimized CPU loading.
         
-        This requires patching because Chandra's hf.py hardcodes CUDA.
-        We load the model manually and use a custom generate function.
+        - float16 instead of float32 (#2)
+        - device_map='auto' with max_memory + offload_folder (#3)
+        - max_memory={'cpu': '4GB'} (#4)
+        - low_cpu_mem_usage=True (#8)
+        - Optional 4-bit quantization (#11)
         """
         import torch
         
         logger.info("=" * 60)
-        logger.info("LOADING CHANDRA IN CPU MODE")
-        logger.info("This will take 10-30 minutes and be SLOW per image.")
-        logger.info("For better performance, use a GPU with 4GB+ VRAM.")
+        logger.info("LOADING CHANDRA - MEMORY OPTIMIZED MODE")
+        logger.info(f"Max CPU Memory: {self.MAX_CPU_MEMORY}")
+        logger.info(f"4-bit Quantization: {self.USE_4BIT_QUANTIZATION}")
+        logger.info("This will take 10-30 minutes. Please wait...")
         logger.info("=" * 60)
         
-        # Import the correct model classes from transformers
-        # Chandra uses Qwen3VL, so we need these specific classes
+        # Import correct model classes
         try:
             from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
         except ImportError:
-            # Fallback for older transformers
-            from transformers import AutoModelForVision2Seq, AutoProcessor
-            logger.warning("Qwen3VL classes not found, using Auto classes")
-            Qwen3VLForConditionalGeneration = AutoModelForVision2Seq
-            Qwen3VLProcessor = AutoProcessor
+            from transformers import AutoModelForVision2Seq as Qwen3VLForConditionalGeneration
+            from transformers import AutoProcessor as Qwen3VLProcessor
+            logger.warning("Using fallback model classes")
         
         model_checkpoint = "datalab-to/chandra"
         
-        logger.info("[1/3] Loading processor...")
+        # Load processor first (lightweight)
+        logger.info("[1/2] Loading processor...")
         self._processor = Qwen3VLProcessor.from_pretrained(
             model_checkpoint,
             trust_remote_code=True
         )
         
-        logger.info("[2/3] Loading model (this takes 10-20 minutes)...")
-        logger.info("      Model will be loaded to RAM in chunks.")
+        # FIX #11: Optional 4-bit quantization
+        quantization_config = None
+        if self.USE_4BIT_QUANTIZATION:
+            try:
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True
+                )
+                logger.info("Using 4-bit quantization (87% memory reduction)")
+            except ImportError:
+                logger.warning("bitsandbytes not installed, skipping 4-bit quantization")
         
-        # Load with CPU-specific settings
-        # Key: device_map must be "cpu" or {"": "cpu"}, NOT "auto"
+        # Load model with ALL memory optimizations
+        logger.info("[2/2] Loading model with memory optimizations...")
+        
+        # FIX #2: float16 instead of float32
+        # FIX #3: device_map='auto' with offload
+        # FIX #4: max_memory to limit RAM
+        # FIX #8: low_cpu_mem_usage=True
+        load_kwargs = {
+            'trust_remote_code': True,
+            'low_cpu_mem_usage': True,  # FIX #8
+            'torch_dtype': torch.float16,  # FIX #2: NOT float32
+            'device_map': 'auto',  # FIX #3
+            'max_memory': {'cpu': self.MAX_CPU_MEMORY},  # FIX #4
+            'offload_folder': str(self._offload_dir),  # FIX #3
+            'offload_state_dict': True,  # FIX #3
+        }
+        
+        if quantization_config:
+            load_kwargs['quantization_config'] = quantization_config
+        
         self._model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_checkpoint,
-            device_map={"": "cpu"},  # Force CPU, not "auto"
-            torch_dtype=torch.float32,  # Float32 for CPU stability
-            trust_remote_code=True,
-            low_cpu_mem_usage=True
+            **load_kwargs
         )
         self._model = self._model.eval()
         self._model.processor = self._processor
         
-        # Set torch threads for CPU performance
-        torch.set_num_threads(os.cpu_count() or 4)
+        # Set torch threads for CPU
+        torch.set_num_threads(max(1, (os.cpu_count() or 4) // 2))
         
         self._use_cpu_mode = True
         self._device = "cpu"
         
-        logger.info("[3/3] CPU mode loaded!")
-        logger.info(f"      Threads: {torch.get_num_threads()}")
+        logger.info(f"Model loaded (threads={torch.get_num_threads()})")
+        logger.info(f"Current memory: {self._get_memory_usage()*100:.1f}%")
     
     # =========================================================================
-    # INFERENCE
+    # INFERENCE - MEMORY OPTIMIZED
     # =========================================================================
     
     def _generate_ocr(self, image: Image.Image) -> dict:
-        """Run OCR inference."""
+        """Run OCR inference with memory management."""
         if self._use_cpu_mode:
-            return self._generate_cpu(image)
+            return self._generate_cpu_optimized(image)
         else:
             return self._generate_via_manager(image)
     
@@ -281,16 +410,16 @@ class OCRService:
         return {
             "markdown": result.markdown or "",
             "html": result.html or "",
-            "json": {},
             "error": result.error
         }
     
-    def _generate_cpu(self, image: Image.Image) -> dict:
+    def _generate_cpu_optimized(self, image: Image.Image) -> dict:
         """
-        Generate OCR on CPU - custom implementation.
+        FIX #5, #6: Memory-optimized CPU generation.
         
-        This is a modified version of chandra.model.hf.generate_hf
-        that works on CPU instead of hardcoded CUDA.
+        - max_new_tokens=512 (reduced from 4096) (#5)
+        - use_cache=True with do_sample=False (#5)
+        - Complete tensor cleanup (#6)
         """
         import torch
         from chandra.model.util import scale_to_fit
@@ -300,13 +429,12 @@ class OCRService:
         try:
             from qwen_vl_utils import process_vision_info
         except ImportError:
-            logger.error("qwen_vl_utils not installed. Run: pip install qwen-vl-utils")
-            return {"markdown": "", "html": "", "json": {}, "error": "qwen_vl_utils missing"}
+            return {"markdown": "", "html": "", "error": "qwen_vl_utils missing"}
         
-        # Scale image to fit model requirements
+        # Scale image
         scaled_image = scale_to_fit(image)
         
-        # Build message (same as chandra's process_batch_element)
+        # Build message
         prompt = PROMPT_MAPPING["ocr_layout"]
         content = [
             {"type": "image", "image": scaled_image},
@@ -328,14 +456,16 @@ class OCRService:
             padding_side="left",
         )
         
-        # KEY FIX: Move to CPU, not CUDA
-        inputs = inputs.to("cpu")
+        # Move to appropriate device
+        inputs = inputs.to(self._device)
         
-        # Generate with no_grad for memory efficiency
+        # FIX #5: Optimized generation with reduced tokens
         with torch.no_grad():
             generated_ids = self._model.generate(
                 **inputs,
-                max_new_tokens=4096  # Reduced from 8192 for CPU
+                max_new_tokens=self.MAX_NEW_TOKENS,  # FIX #5: Reduced from 4096
+                use_cache=True,  # FIX #5: Enable KV cache
+                do_sample=False,  # FIX #5: Deterministic generation
             )
         
         # Decode
@@ -355,19 +485,29 @@ class OCRService:
         markdown = parse_markdown(raw_output)
         html = parse_html(raw_output)
         
-        # Cleanup
-        del inputs, generated_ids, generated_ids_trimmed
-        gc.collect()
+        # FIX #6: Complete tensor cleanup - ALL intermediate variables
+        del inputs
+        del generated_ids
+        del generated_ids_trimmed
+        del image_inputs
+        del scaled_image
+        del messages
+        del text
+        if 'output_text' in locals():
+            del output_text
+        if 'raw_output' in locals():
+            del raw_output
+        
+        self._force_cleanup()
         
         return {
             "markdown": markdown,
             "html": html,
-            "json": {},
             "error": None
         }
     
     # =========================================================================
-    # PROCESSING
+    # PROCESSING - MEMORY OPTIMIZED
     # =========================================================================
     
     def _process_single_image_sync(
@@ -375,8 +515,11 @@ class OCRService:
         image: Image.Image,
         page_number: int = 1
     ) -> OCROutput:
-        """Process single image."""
+        """Process single image with memory management."""
         with self._semaphore:
+            # FIX #7: Check memory before processing
+            self._check_memory_and_cleanup()
+            
             start_time = time.time()
             original_size = image.size
             
@@ -389,15 +532,24 @@ class OCRService:
                     max_dimension=self.max_dimension
                 )
                 
+                # FIX #9: Delete original image copy immediately
+                if image is not optimized:
+                    del image
+                
                 logger.info(f"Processing image {page_number} ({optimized.size})...")
                 
                 output = self._generate_ocr(optimized)
                 
                 processing_time = int((time.time() - start_time) * 1000)
                 
-                # Cleanup
+                # FIX #9: Cleanup optimized image
                 del optimized
-                gc.collect()
+                
+                # FIX #1: Unload model after request if configured
+                if self.UNLOAD_AFTER_REQUEST:
+                    self._unload_model()
+                else:
+                    self._force_cleanup()
                 
                 if output.get("error"):
                     return OCROutput(
@@ -412,7 +564,6 @@ class OCRService:
                 return OCROutput(
                     markdown=output.get("markdown", ""),
                     html=output.get("html", ""),
-                    json_output=output.get("json", {}),
                     processing_time_ms=processing_time,
                     success=True,
                     page_number=page_number,
@@ -423,7 +574,9 @@ class OCRService:
             except Exception as e:
                 processing_time = int((time.time() - start_time) * 1000)
                 logger.error(f"OCR failed: {e}", exc_info=True)
-                gc.collect()
+                
+                # Always cleanup on error
+                self._unload_model()
                 
                 return OCROutput(
                     success=False,
@@ -450,6 +603,10 @@ class OCRService:
         else:
             raise ValueError(f"Unsupported image type: {type(image_source)}")
         
+        # FIX #9: Delete source reference if it was loaded
+        if isinstance(image_source, (str, Path, bytes)):
+            del image_source
+        
         # Preprocess
         image = image_preprocessor.optimize_for_ocr(
             image,
@@ -475,7 +632,15 @@ class OCRService:
                 logger.info(f"Processing PDF page {i}/{len(images)}")
                 result = self._process_single_image_sync(page_image, i)
                 page_results.append(result)
-                gc.collect()
+                
+                # FIX #9: Delete page image immediately
+                del page_image
+                
+                # FIX #7: Check memory between pages
+                self._check_memory_and_cleanup()
+            
+            # FIX #9: Delete images list
+            del images
             
             combined_md = self._combine_markdown(page_results)
             combined_html = self._combine_html(page_results)
@@ -496,6 +661,7 @@ class OCRService:
         except Exception as e:
             total_time = int((time.time() - start_time) * 1000)
             logger.error(f"PDF processing failed: {e}")
+            self._unload_model()
             return DocumentOCRResult(
                 success=False,
                 error=str(e),
@@ -510,21 +676,22 @@ class OCRService:
         self,
         image_source: Union[str, Path, Image.Image, bytes],
         page_number: int = 1,
-        timeout: float = 600.0
+        timeout: float = 900.0  # 15 min for slow CPU
     ) -> OCROutput:
-        """Async image processing with timeout."""
+        """Async image processing."""
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self.process_image_sync, image_source, page_number),
                 timeout=timeout
             )
         except asyncio.TimeoutError:
+            self._unload_model()
             return OCROutput(success=False, error=f"Timed out after {timeout}s")
     
     async def process_pdf(
         self,
         pdf_path: Union[str, Path],
-        timeout: float = 1800.0
+        timeout: float = 3600.0  # 1 hour for multi-page PDFs
     ) -> DocumentOCRResult:
         """Async PDF processing."""
         try:
@@ -533,6 +700,7 @@ class OCRService:
                 timeout=timeout
             )
         except asyncio.TimeoutError:
+            self._unload_model()
             return DocumentOCRResult(success=False, error=f"Timed out after {timeout}s")
     
     async def process_document(
@@ -591,10 +759,15 @@ class OCRService:
         return {
             "model_loaded": self._model_loaded,
             "mode": "cpu" if self._use_cpu_mode else "gpu",
-            "device": self._device
+            "device": self._device,
+            "memory_usage": f"{self._get_memory_usage()*100:.1f}%",
+            "max_memory": self.MAX_CPU_MEMORY,
+            "unload_after_request": self.UNLOAD_AFTER_REQUEST,
+            "4bit_quantization": self.USE_4BIT_QUANTIZATION
         }
     
     def preload_model(self) -> None:
+        """Preload model (not recommended for memory-constrained systems)."""
         self._ensure_model_loaded()
     
     @property
@@ -602,17 +775,10 @@ class OCRService:
         return self._model_loaded
     
     def cleanup(self) -> None:
-        """Cleanup resources."""
+        """Full cleanup."""
+        self._unload_model()
         if self._executor:
             self._executor.shutdown(wait=False)
-        if self._model is not None:
-            del self._model
-            self._model = None
-        if self._processor is not None:
-            del self._processor
-            self._processor = None
-        self._model_loaded = False
-        gc.collect()
         logger.info("OCR Service cleaned up")
 
 
@@ -651,7 +817,7 @@ async def ocr_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def preload_ocr_model() -> None:
-    """Preload model at startup."""
+    """Preload model at startup (not recommended for 8GB systems)."""
     try:
         ocr_service.preload_model()
     except Exception as e:
