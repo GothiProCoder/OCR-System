@@ -80,3 +80,10 @@ Thumbs.db
 *.onnx
 *.pt
 *.bin
+
+Knowledge Base
+tests
+.model_offload
+COMPLETE_OCR_SERVICE_ANALYSIS.txt
+*.md
+storage
