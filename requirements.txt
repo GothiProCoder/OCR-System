@@ -1,0 +1,45 @@
+# ===========================================
+# OCR Form Extraction System - Requirements
+# ===========================================
+
+# ===== Core Backend =====
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+
+# ===== Database =====
+sqlalchemy
+psycopg2-binary
+asyncpg
+alembic
+
+# ===== OCR Engine =====
+chandra-ocr
+Pillow
+pdf2image
+
+# ===== AI / LLM =====
+google-genai
+
+# ===== Frontend =====
+streamlit
+streamlit-extras
+plotly
+
+# ===== Export =====
+openpyxl
+reportlab
+
+# ===== HTTP Client =====
+httpx
+
+# ===== Testing =====
+pytest
+pytest-asyncio
+
+# ===== Utilities =====
+pydantic
+
+langgraph
+langchain
