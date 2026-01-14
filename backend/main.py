@@ -10,6 +10,7 @@ Usage:
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 import logging
@@ -196,44 +197,78 @@ async def root():
 
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """Health check endpoint"""
+    """
+    Comprehensive health check endpoint.
+    Returns status of all system components.
+    """
     health = {
         "status": "healthy",
         "app": settings.APP_NAME,
+        "version": "1.0.0",
         "environment": settings.APP_ENV,
+        "debug": settings.DEBUG,
         "checks": {}
     }
     
-    # Check database
+    # Check database connection
     try:
         from database import sync_engine
         with sync_engine.connect() as conn:
-            conn.execute("SELECT 1")
-        health["checks"]["database"] = "ok"
+            conn.execute(text("SELECT 1"))
+        health["checks"]["database"] = {
+            "status": "ok",
+            "type": "postgresql"
+        }
     except Exception as e:
-        health["checks"]["database"] = f"error: {str(e)}"
+        health["checks"]["database"] = {
+            "status": "error",
+            "message": str(e)
+        }
         health["status"] = "degraded"
     
-    # Check storage
+    # Check storage directories
     try:
-        health["checks"]["storage"] = {
+        storage_checks = {
             "uploads": settings.UPLOAD_PATH.exists(),
             "processed": settings.PROCESSED_PATH.exists(),
             "exports": settings.EXPORT_PATH.exists()
         }
+        all_ok = all(storage_checks.values())
+        health["checks"]["storage"] = {
+            "status": "ok" if all_ok else "warning",
+            "directories": storage_checks
+        }
     except Exception as e:
-        health["checks"]["storage"] = f"error: {str(e)}"
+        health["checks"]["storage"] = {
+            "status": "error",
+            "message": str(e)
+        }
+    
+    # Check Gemini API configuration
+    try:
+        gemini_configured = bool(settings.GEMINI_API_KEY)
+        health["checks"]["gemini"] = {
+            "status": "ok" if gemini_configured else "warning",
+            "configured": gemini_configured,
+            "model": settings.GEMINI_MODEL
+        }
+        if not gemini_configured:
+            health["status"] = "degraded"
+    except Exception as e:
+        health["checks"]["gemini"] = {
+            "status": "error",
+            "message": str(e)
+        }
     
     return health
 
 
 # =============================================================================
-# INCLUDE ROUTERS (Add as they are implemented)
+# INCLUDE ROUTERS
 # =============================================================================
 
-# TODO: Uncomment as routers are implemented
-# from api.router import api_router
-# app.include_router(api_router, prefix="/api")
+from api.router import api_router
+app.include_router(api_router, prefix="/api")
 
 
 # =============================================================================

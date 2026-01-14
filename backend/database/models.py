@@ -183,7 +183,7 @@ class Document(Base):
     )
     
     # Flexible Metadata
-    metadata = Column(
+    custom_metadata = Column(
         JSONB,
         default=dict,
         comment="Additional metadata (dimensions, color depth, etc.)"
@@ -498,7 +498,7 @@ class ExtractedField(Base):
     )
     
     # Flexible Metadata
-    metadata = Column(
+    custom_metadata = Column(
         JSONB,
         default=dict,
         comment="Additional field metadata"

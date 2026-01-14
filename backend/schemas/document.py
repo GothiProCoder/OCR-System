@@ -82,7 +82,7 @@ class DocumentUploadMeta(BaseModel):
         True,
         description="Automatically start extraction after upload"
     )
-    metadata: Optional[Dict[str, Any]] = Field(
+    custom_metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
         description="Additional custom metadata"
     )
@@ -92,7 +92,7 @@ class DocumentUploadMeta(BaseModel):
             "example": {
                 "custom_filename": "employee_application_001",
                 "auto_extract": True,
-                "metadata": {"department": "HR", "batch_id": "2024-01"}
+                "custom_metadata": {"department": "HR", "batch_id": "2024-01"}
             }
         }
     )
@@ -118,7 +118,7 @@ class DocumentUpdate(BaseModel):
         pattern=r"^[a-z]{2}(-[A-Z]{2})?$",
         description="Language code (e.g., 'en', 'en-US')"
     )
-    metadata: Optional[Dict[str, Any]] = Field(
+    custom_metadata: Optional[Dict[str, Any]] = Field(
         None,
         description="Update custom metadata"
     )
@@ -199,7 +199,7 @@ class DocumentResponse(DocumentBase):
     form_type: Optional[str] = Field(None, description="Detected form type")
     language: Optional[str] = Field(None, description="Detected language")
     
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    custom_metadata: Dict[str, Any] = Field(default_factory=dict)
     
     is_deleted: bool = Field(False, description="Soft delete flag")
     created_at: datetime = Field(..., description="Upload timestamp")
@@ -250,7 +250,7 @@ class DocumentResponse(DocumentBase):
                 "status": "completed",
                 "form_type": "Application Form",
                 "language": "en",
-                "metadata": {},
+                "custom_metadata": {},
                 "is_deleted": False,
                 "created_at": "2024-01-15T10:30:00Z",
                 "updated_at": "2024-01-15T10:35:00Z",

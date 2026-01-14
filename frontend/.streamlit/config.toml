@@ -1,0 +1,17 @@
+[theme]
+# Lumina Design System - Light Theme Configuration
+primaryColor = "#4F46E5"    # Indigo-600 (Action color)
+backgroundColor = "#F8FAFC" # Slate-50 (App background - soft grey)
+secondaryBackgroundColor = "#FFFFFF" # White (Sidebar/Cards)
+textColor = "#0F172A"       # Slate-900 (High contrast text)
+font = "sans serif"         # Inter (loaded via CSS)
+
+[server]
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+magicEnabled = false

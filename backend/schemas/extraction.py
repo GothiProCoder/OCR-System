@@ -116,7 +116,7 @@ class ExtractedFieldCreate(ExtractedFieldBase):
     bounding_box: Optional[BoundingBox] = None
     page_number: int = Field(1, ge=1)
     sort_order: int = Field(0, ge=0)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    custom_metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ExtractedFieldResponse(ExtractedFieldBase):
@@ -134,7 +134,7 @@ class ExtractedFieldResponse(ExtractedFieldBase):
     bounding_box: Optional[BoundingBox] = None
     page_number: int = Field(1)
     sort_order: int = Field(0)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    custom_metadata: Dict[str, Any] = Field(default_factory=dict)
     
     created_at: datetime
     updated_at: datetime
@@ -184,7 +184,7 @@ class ExtractedFieldResponse(ExtractedFieldBase):
                 },
                 "page_number": 1,
                 "sort_order": 0,
-                "metadata": {},
+                "custom_metadata": {},
                 "created_at": "2024-01-15T10:30:00Z",
                 "updated_at": "2024-01-15T10:30:00Z"
             }
@@ -207,7 +207,7 @@ class ExtractedFieldUpdate(BaseModel):
         None,
         description="Manual validation override"
     )
-    metadata: Optional[Dict[str, Any]] = Field(
+    custom_metadata: Optional[Dict[str, Any]] = Field(
         None,
         description="Update metadata"
     )

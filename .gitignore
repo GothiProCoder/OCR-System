@@ -87,3 +87,8 @@ tests
 COMPLETE_OCR_SERVICE_ANALYSIS.txt
 *.md
 storage
+.venv_paddleocr
+output
+
+test_*.py
+OCR-System.code-workspace

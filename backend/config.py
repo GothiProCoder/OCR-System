@@ -16,6 +16,8 @@ from pathlib import Path
 from functools import lru_cache
 from typing import List
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 class Settings(BaseSettings):
     """
@@ -24,7 +26,7 @@ class Settings(BaseSettings):
     """
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=PROJECT_ROOT / ".env",   # ✅ ALWAYS root
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore"
@@ -65,7 +67,14 @@ class Settings(BaseSettings):
     
     # ===== OCR SETTINGS =====
     OCR_MAX_IMAGE_DIMENSION: int = 2000
-    OCR_INFERENCE_METHOD: str = "hf"
+    OCR_INFERENCE_METHOD: str = "paddleocr"  # Changed from "hf" to "paddleocr"
+    
+    # ===== PADDLEOCR-VL SETTINGS =====
+    PADDLEOCR_USE_LAYOUT_DETECTION: bool = True
+    PADDLEOCR_USE_DOC_ORIENTATION: bool = False
+    PADDLEOCR_USE_DOC_UNWARPING: bool = False
+    PADDLEOCR_USE_CHART_RECOGNITION: bool = False
+    PADDLEOCR_DEVICE: str = ""  # Empty = auto-detect, or "cpu", "gpu:0"
     
     # ===== EXTRACTION SETTINGS =====
     CONFIDENCE_HIGH_THRESHOLD: float = 0.85

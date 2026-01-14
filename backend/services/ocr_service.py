@@ -1,21 +1,22 @@
 """
-OCR Service - MEMORY OPTIMIZED FOR 8GB RAM
-===========================================
-Implements ALL 11 memory optimization fixes:
+OCR Service - PaddleOCR-VL Implementation
+==========================================
+Complete rewrite using PaddleOCR-VL for document parsing.
 
-#1: Model unloads after each request (load-on-demand)
-#2: torch.float16 instead of float32 (50% memory reduction)
-#3: device_map='auto' with max_memory + offload_folder
-#4: max_memory={'cpu': '4GB'} to limit RAM usage
-#5: max_new_tokens=512 with cache management
-#6: Complete tensor cleanup (ALL intermediate variables)
-#7: Memory monitoring with forced cleanup at 80% RAM
-#8: low_cpu_mem_usage=True + max_memory combined
-#9: Immediate deletion of image copies
-#10: Enhanced cleanup with PyTorch-specific commands
-#11: BONUS: 4-bit quantization option for extreme constraints
+Features:
+- Page-level document parsing with layout detection
+- Element-level recognition (text, tables, formulas, charts)
+- 109 language support
+- Native Markdown/JSON/HTML output
+- CPU and GPU support
+- ~2.5GB VRAM (vs Chandra's 8GB+)
 
-Target: Run Chandra OCR on 8GB RAM without crashing
+Architecture:
+- PP-DocLayoutV2: Layout detection and reading order
+- PaddleOCR-VL-0.9B: Vision-Language model for recognition
+
+Note: Requires NumPy < 2.0 for compatibility with PaddleOCR-VL.
+Run: pip install "numpy<2.0.0" if you get scalar conversion errors.
 """
 
 from pathlib import Path
@@ -29,6 +30,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import gc
 import os
+import tempfile
+import io
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -55,6 +58,7 @@ class OCROutput:
     page_number: int = 1
     image_width: int = 0
     image_height: int = 0
+    layout_boxes: List[Dict[str, Any]] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,7 +70,8 @@ class OCROutput:
             "error": self.error,
             "page_number": self.page_number,
             "image_width": self.image_width,
-            "image_height": self.image_height
+            "image_height": self.image_height,
+            "layout_boxes": self.layout_boxes
         }
 
 
@@ -94,32 +99,28 @@ class DocumentOCRResult:
 
 
 # =============================================================================
-# OCR SERVICE - MEMORY OPTIMIZED
+# OCR SERVICE - PaddleOCR-VL Implementation
 # =============================================================================
 
 class OCRService:
     """
-    Memory-optimized Chandra OCR Service for 8GB RAM systems.
+    PaddleOCR-VL Document Parsing Service.
     
-    Key optimizations:
-    - Load model on demand, unload after each request (#1)
-    - Float16 precision (#2)
-    - Disk offloading with 4GB max RAM (#3, #4)
-    - Reduced token generation (#5)
-    - Aggressive memory cleanup (#6, #10)
-    - Memory monitoring (#7)
-    - Optional 4-bit quantization (#11)
+    Features:
+    - Full page-level document parsing with layout detection
+    - Element-level recognition (text, tables, formulas, charts)
+    - Native Markdown/JSON/HTML output
+    - CPU and GPU support (auto-detect)
+    - Lazy model loading (loads on first use)
+    
+    Model Info:
+    - PaddleOCR-VL-0.9B: 0.9 billion parameters
+    - VRAM requirement: ~2.5GB GPU or ~5GB RAM for CPU
+    - Inference time: 2-3 seconds/page on GPU, 30-60 seconds on CPU
     """
     
     _instance = None
     _lock = threading.Lock()
-    
-    # Configuration
-    USE_4BIT_QUANTIZATION = False  # Set True for extreme memory constraints
-    MAX_CPU_MEMORY = "4GB"  # FIX #4: Limit RAM usage
-    MAX_NEW_TOKENS = 512  # FIX #5: Reduced from 4096
-    MEMORY_THRESHOLD = 0.80  # FIX #7: Force cleanup at 80% RAM
-    UNLOAD_AFTER_REQUEST = True  # FIX #1: Unload model after each request
     
     def __new__(cls):
         if cls._instance is None:
@@ -133,141 +134,75 @@ class OCRService:
         if getattr(self, '_initialized', False):
             return
         
-        self._manager = None
-        self._model = None
-        self._processor = None
+        self._pipeline = None
         self._model_loaded = False
         self._model_lock = threading.Lock()
-        self._use_cpu_mode = False
         self._device = None
+        self._is_gpu = False
         
-        # Single worker to prevent memory accumulation
+        # Single worker for sequential processing
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._semaphore = threading.Semaphore(1)
         
-        self.max_dimension = settings.OCR_MAX_IMAGE_DIMENSION
-        
-        # Offload directory for disk offloading
-        self._offload_dir = Path(settings.PROJECT_ROOT) / ".model_offload"
-        self._offload_dir.mkdir(parents=True, exist_ok=True)
+        # Configuration from settings
+        self.max_dimension = getattr(settings, 'OCR_MAX_IMAGE_DIMENSION', 2000)
+        self.use_layout_detection = getattr(settings, 'PADDLEOCR_USE_LAYOUT_DETECTION', True)
+        self.use_doc_orientation_classify = getattr(settings, 'PADDLEOCR_USE_DOC_ORIENTATION', False)
+        self.use_doc_unwarping = getattr(settings, 'PADDLEOCR_USE_DOC_UNWARPING', False)
+        self.use_chart_recognition = getattr(settings, 'PADDLEOCR_USE_CHART_RECOGNITION', False)
+        self._configured_device = getattr(settings, 'PADDLEOCR_DEVICE', '') or None
         
         self._initialized = True
-        logger.info("OCR Service initialized (memory-optimized mode)")
-    
-    # =========================================================================
-    # FIX #7 & #10: MEMORY MONITORING & ENHANCED CLEANUP
-    # =========================================================================
-    
-    def _get_memory_usage(self) -> float:
-        """Get current memory usage as percentage."""
-        try:
-            import psutil
-            return psutil.virtual_memory().percent / 100.0
-        except ImportError:
-            return 0.5  # Assume 50% if psutil not available
-    
-    def _force_cleanup(self) -> None:
-        """
-        FIX #10: Enhanced cleanup with PyTorch-specific commands.
-        Maximizes memory reclamation.
-        """
-        import torch
-        
-        # Triple gc.collect for thorough cleanup
-        gc.collect()
-        gc.collect()
-        gc.collect()
-        
-        # PyTorch-specific cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        
-        # Clear any cached tensors
-        if hasattr(torch, '_C') and hasattr(torch._C, '_cuda_clearCublasWorkspaces'):
-            try:
-                torch._C._cuda_clearCublasWorkspaces()
-            except:
-                pass
-        
-        # Linux-specific: trim malloc
-        try:
-            import ctypes
-            libc = ctypes.CDLL("libc.so.6")
-            libc.malloc_trim(0)
-        except:
-            pass  # Not on Linux or libc not available
-        
-        gc.collect()
-    
-    def _check_memory_and_cleanup(self) -> None:
-        """FIX #7: Check memory and force cleanup if needed."""
-        mem_usage = self._get_memory_usage()
-        if mem_usage > self.MEMORY_THRESHOLD:
-            logger.warning(f"Memory at {mem_usage*100:.1f}%, forcing cleanup...")
-            self._force_cleanup()
-            
-            # If still high, unload model
-            if self._get_memory_usage() > self.MEMORY_THRESHOLD:
-                logger.warning("Memory still high, unloading model...")
-                self._unload_model()
-    
-    # =========================================================================
-    # FIX #1: MODEL UNLOADING
-    # =========================================================================
-    
-    def _unload_model(self) -> None:
-        """FIX #1: Unload model to free memory."""
-        with self._model_lock:
-            if self._model is not None:
-                logger.info("Unloading model to free memory...")
-                del self._model
-                self._model = None
-            if self._processor is not None:
-                del self._processor
-                self._processor = None
-            if self._manager is not None:
-                del self._manager
-                self._manager = None
-            
-            self._model_loaded = False
-            self._force_cleanup()
-            logger.info("Model unloaded, memory freed")
+        logger.info("OCR Service initialized (PaddleOCR-VL mode)")
     
     # =========================================================================
     # HARDWARE DETECTION
     # =========================================================================
     
-    def _detect_hardware(self) -> dict:
-        """Detect available hardware."""
-        import torch
+    def _detect_hardware(self) -> Dict[str, Any]:
+        """Detect available hardware (CPU/GPU)."""
+        # Use configured device if specified
+        if self._configured_device:
+            is_gpu = self._configured_device.startswith('gpu')
+            return {
+                'gpu_available': is_gpu,
+                'gpu_count': 1 if is_gpu else 0,
+                'device': self._configured_device
+            }
         
-        gpu_available = torch.cuda.is_available()
-        gpu_memory = 0
-        if gpu_available:
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        
+        # Auto-detect hardware
         try:
-            import psutil
-            ram_total = psutil.virtual_memory().total / (1024**3)
-            ram_available = psutil.virtual_memory().available / (1024**3)
+            import paddle
+            gpu_available = paddle.is_compiled_with_cuda()
+            
+            if gpu_available:
+                try:
+                    gpu_count = paddle.device.cuda.device_count()
+                except:
+                    gpu_count = 0
+                    gpu_available = False
+            else:
+                gpu_count = 0
+            
+            return {
+                'gpu_available': gpu_available,
+                'gpu_count': gpu_count,
+                'device': 'gpu:0' if gpu_available else 'cpu'
+            }
         except ImportError:
-            ram_total = 8.0
-            ram_available = 4.0
-        
-        return {
-            'gpu_available': gpu_available,
-            'gpu_memory_gb': gpu_memory,
-            'ram_total_gb': ram_total,
-            'ram_available_gb': ram_available
-        }
+            logger.warning("PaddlePaddle not imported yet, assuming CPU")
+            return {
+                'gpu_available': False,
+                'gpu_count': 0,
+                'device': 'cpu'
+            }
     
     # =========================================================================
-    # MODEL LOADING - MEMORY OPTIMIZED
+    # MODEL LOADING
     # =========================================================================
     
-    def _ensure_model_loaded(self) -> None:
-        """Load model with memory optimizations."""
+    def _ensure_pipeline_loaded(self) -> None:
+        """Lazy-load PaddleOCR-VL pipeline on first use."""
         if self._model_loaded:
             return
         
@@ -275,239 +210,144 @@ class OCRService:
             if self._model_loaded:
                 return
             
-            # Check memory before loading
-            self._check_memory_and_cleanup()
+            logger.info("=" * 60)
+            logger.info("LOADING PaddleOCR-VL Pipeline")
+            logger.info("This may take a few minutes on first run (downloading models)...")
+            logger.info("=" * 60)
             
-            hw = self._detect_hardware()
-            logger.info(f"Hardware: GPU={hw['gpu_available']}, RAM={hw['ram_available_gb']:.1f}GB available")
+            start_time = time.time()
             
-            if hw['gpu_available'] and hw['gpu_memory_gb'] >= 4:
-                self._load_gpu_mode()
-            else:
-                self._load_cpu_mode_optimized()
-            
-            self._model_loaded = True
-    
-    def _load_gpu_mode(self) -> None:
-        """Load using standard InferenceManager (GPU)."""
-        logger.info("Loading Chandra in GPU mode...")
-        
-        try:
-            from chandra.model import InferenceManager
-            self._manager = InferenceManager(method="hf")
-            self._use_cpu_mode = False
-            self._device = "cuda"
-            logger.info("GPU mode loaded")
-        except Exception as e:
-            logger.warning(f"GPU mode failed: {e}, falling back to CPU")
-            self._load_cpu_mode_optimized()
-    
-    def _load_cpu_mode_optimized(self) -> None:
-        """
-        FIX #2, #3, #4, #8, #11: Memory-optimized CPU loading.
-        
-        - float16 instead of float32 (#2)
-        - device_map='auto' with max_memory + offload_folder (#3)
-        - max_memory={'cpu': '4GB'} (#4)
-        - low_cpu_mem_usage=True (#8)
-        - Optional 4-bit quantization (#11)
-        """
-        import torch
-        
-        logger.info("=" * 60)
-        logger.info("LOADING CHANDRA - MEMORY OPTIMIZED MODE")
-        logger.info(f"Max CPU Memory: {self.MAX_CPU_MEMORY}")
-        logger.info(f"4-bit Quantization: {self.USE_4BIT_QUANTIZATION}")
-        logger.info("This will take 10-30 minutes. Please wait...")
-        logger.info("=" * 60)
-        
-        # Import correct model classes
-        try:
-            from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
-        except ImportError:
-            from transformers import AutoModelForVision2Seq as Qwen3VLForConditionalGeneration
-            from transformers import AutoProcessor as Qwen3VLProcessor
-            logger.warning("Using fallback model classes")
-        
-        model_checkpoint = "datalab-to/chandra"
-        
-        # Load processor first (lightweight)
-        logger.info("[1/2] Loading processor...")
-        self._processor = Qwen3VLProcessor.from_pretrained(
-            model_checkpoint,
-            trust_remote_code=True
-        )
-        
-        # FIX #11: Optional 4-bit quantization
-        quantization_config = None
-        if self.USE_4BIT_QUANTIZATION:
             try:
-                from transformers import BitsAndBytesConfig
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_use_double_quant=True
+                from paddleocr import PaddleOCRVL
+                
+                # Detect hardware
+                hw = self._detect_hardware()
+                self._device = hw['device']
+                self._is_gpu = hw['gpu_available']
+                
+                logger.info(f"Device: {self._device}")
+                logger.info(f"GPU Available: {self._is_gpu}")
+                
+                # Initialize pipeline with configured settings
+                self._pipeline = PaddleOCRVL(
+                    device=self._device,
+                    use_layout_detection=self.use_layout_detection,
+                    use_doc_orientation_classify=self.use_doc_orientation_classify,
+                    use_doc_unwarping=self.use_doc_unwarping,
+                    use_chart_recognition=self.use_chart_recognition,
                 )
-                logger.info("Using 4-bit quantization (87% memory reduction)")
-            except ImportError:
-                logger.warning("bitsandbytes not installed, skipping 4-bit quantization")
-        
-        # Load model with ALL memory optimizations
-        logger.info("[2/2] Loading model with memory optimizations...")
-        
-        # FIX #2: float16 instead of float32
-        # FIX #3: device_map='auto' with offload
-        # FIX #4: max_memory to limit RAM
-        # FIX #8: low_cpu_mem_usage=True
-        load_kwargs = {
-            'trust_remote_code': True,
-            'low_cpu_mem_usage': True,  # FIX #8
-            'torch_dtype': torch.float16,  # FIX #2: NOT float32
-            'device_map': 'auto',  # FIX #3
-            'max_memory': {'cpu': self.MAX_CPU_MEMORY},  # FIX #4
-            'offload_folder': str(self._offload_dir),  # FIX #3
-            'offload_state_dict': True,  # FIX #3
-        }
-        
-        if quantization_config:
-            load_kwargs['quantization_config'] = quantization_config
-        
-        self._model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_checkpoint,
-            **load_kwargs
-        )
-        self._model = self._model.eval()
-        self._model.processor = self._processor
-        
-        # Set torch threads for CPU
-        torch.set_num_threads(max(1, (os.cpu_count() or 4) // 2))
-        
-        self._use_cpu_mode = True
-        self._device = "cpu"
-        
-        logger.info(f"Model loaded (threads={torch.get_num_threads()})")
-        logger.info(f"Current memory: {self._get_memory_usage()*100:.1f}%")
+                
+                elapsed = time.time() - start_time
+                self._model_loaded = True
+                
+                logger.info(f"PaddleOCR-VL loaded successfully in {elapsed:.1f}s")
+                logger.info("=" * 60)
+                
+            except ImportError as e:
+                logger.error(f"PaddleOCR not installed: {e}")
+                logger.error("Please install: pip install paddleocr[doc-parser]")
+                raise RuntimeError(f"PaddleOCR not installed: {e}")
+            
+            except Exception as e:
+                logger.error(f"Failed to load PaddleOCR-VL: {e}")
+                raise RuntimeError(f"Failed to load PaddleOCR-VL: {e}")
+    
+    def _unload_pipeline(self) -> None:
+        """Unload pipeline to free memory (optional)."""
+        with self._model_lock:
+            if self._pipeline is not None:
+                logger.info("Unloading PaddleOCR-VL pipeline...")
+                del self._pipeline
+                self._pipeline = None
+                self._model_loaded = False
+                gc.collect()
+                logger.info("Pipeline unloaded")
     
     # =========================================================================
-    # INFERENCE - MEMORY OPTIMIZED
+    # CORE PROCESSING
     # =========================================================================
     
-    def _generate_ocr(self, image: Image.Image) -> dict:
-        """Run OCR inference with memory management."""
-        if self._use_cpu_mode:
-            return self._generate_cpu_optimized(image)
-        else:
-            return self._generate_via_manager(image)
-    
-    def _generate_via_manager(self, image: Image.Image) -> dict:
-        """Generate using standard InferenceManager (GPU)."""
-        from chandra.model.schema import BatchInputItem
-        
-        batch = [BatchInputItem(image=image, prompt_type="ocr_layout")]
-        results = self._manager.generate(batch)
-        result = results[0]
-        
-        return {
-            "markdown": result.markdown or "",
-            "html": result.html or "",
-            "error": result.error
-        }
-    
-    def _generate_cpu_optimized(self, image: Image.Image) -> dict:
+    def _process_with_pipeline(self, input_path: str) -> List[Dict[str, Any]]:
         """
-        FIX #5, #6: Memory-optimized CPU generation.
+        Run PaddleOCR-VL pipeline on input.
         
-        - max_new_tokens=512 (reduced from 4096) (#5)
-        - use_cache=True with do_sample=False (#5)
-        - Complete tensor cleanup (#6)
+        Args:
+            input_path: Path to image or PDF file
+            
+        Returns:
+            List of result dictionaries (one per page)
         """
-        import torch
-        from chandra.model.util import scale_to_fit
-        from chandra.prompts import PROMPT_MAPPING
-        from chandra.output import parse_markdown, parse_html
+        self._ensure_pipeline_loaded()
+        
+        results = []
         
         try:
-            from qwen_vl_utils import process_vision_info
-        except ImportError:
-            return {"markdown": "", "html": "", "error": "qwen_vl_utils missing"}
+            output = self._pipeline.predict(input_path)
+            
+            for res in output:
+                # Extract markdown
+                md_info = res.markdown
+                markdown_text = md_info.get("markdown_text", "") if isinstance(md_info, dict) else ""
+                
+                # Extract JSON
+                json_data = res.json if hasattr(res, 'json') else {}
+                
+                # Extract layout boxes if available
+                layout_boxes = []
+                if hasattr(res, 'json') and isinstance(res.json, dict):
+                    layout_det = res.json.get('layout_det_res', {})
+                    if isinstance(layout_det, dict):
+                        boxes = layout_det.get('boxes', [])
+                        for box in boxes:
+                            layout_boxes.append({
+                                'label': box.get('label', ''),
+                                'score': float(box.get('score', 0)),
+                                'coordinate': [float(c) for c in box.get('coordinate', [])]
+                            })
+                
+                # Generate HTML (save to temp and read)
+                html_content = self._generate_html_from_result(res)
+                
+                results.append({
+                    'markdown': markdown_text,
+                    'html': html_content,
+                    'json': json_data,
+                    'layout_boxes': layout_boxes,
+                    'error': None
+                })
+                
+        except Exception as e:
+            logger.error(f"Pipeline processing failed: {e}")
+            results.append({
+                'markdown': '',
+                'html': '',
+                'json': {},
+                'layout_boxes': [],
+                'error': str(e)
+            })
         
-        # Scale image
-        scaled_image = scale_to_fit(image)
-        
-        # Build message
-        prompt = PROMPT_MAPPING["ocr_layout"]
-        content = [
-            {"type": "image", "image": scaled_image},
-            {"type": "text", "text": prompt}
-        ]
-        messages = [{"role": "user", "content": content}]
-        
-        # Process
-        text = self._processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        
-        image_inputs, _ = process_vision_info(messages)
-        inputs = self._processor(
-            text=text,
-            images=image_inputs,
-            padding=True,
-            return_tensors="pt",
-            padding_side="left",
-        )
-        
-        # Move to appropriate device
-        inputs = inputs.to(self._device)
-        
-        # FIX #5: Optimized generation with reduced tokens
-        with torch.no_grad():
-            generated_ids = self._model.generate(
-                **inputs,
-                max_new_tokens=self.MAX_NEW_TOKENS,  # FIX #5: Reduced from 4096
-                use_cache=True,  # FIX #5: Enable KV cache
-                do_sample=False,  # FIX #5: Deterministic generation
-            )
-        
-        # Decode
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        output_text = self._processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        
-        raw_output = output_text[0] if output_text else ""
-        
-        # Parse output
-        markdown = parse_markdown(raw_output)
-        html = parse_html(raw_output)
-        
-        # FIX #6: Complete tensor cleanup - ALL intermediate variables
-        del inputs
-        del generated_ids
-        del generated_ids_trimmed
-        del image_inputs
-        del scaled_image
-        del messages
-        del text
-        if 'output_text' in locals():
-            del output_text
-        if 'raw_output' in locals():
-            del raw_output
-        
-        self._force_cleanup()
-        
-        return {
-            "markdown": markdown,
-            "html": html,
-            "error": None
-        }
+        return results
+    
+    def _generate_html_from_result(self, res) -> str:
+        """Generate HTML from PaddleOCR result."""
+        try:
+            # Create temp directory for HTML output
+            with tempfile.TemporaryDirectory() as tmpdir:
+                res.save_to_html(save_path=tmpdir)
+                
+                # Find the generated HTML file
+                html_files = list(Path(tmpdir).glob("*.html"))
+                if html_files:
+                    with open(html_files[0], 'r', encoding='utf-8') as f:
+                        return f.read()
+            
+            return ""
+        except Exception as e:
+            logger.warning(f"HTML generation failed: {e}")
+            return ""
     
     # =========================================================================
-    # PROCESSING - MEMORY OPTIMIZED
+    # IMAGE PROCESSING
     # =========================================================================
     
     def _process_single_image_sync(
@@ -515,68 +355,64 @@ class OCRService:
         image: Image.Image,
         page_number: int = 1
     ) -> OCROutput:
-        """Process single image with memory management."""
+        """Process a single image synchronously."""
         with self._semaphore:
-            # FIX #7: Check memory before processing
-            self._check_memory_and_cleanup()
-            
             start_time = time.time()
             original_size = image.size
             
             try:
-                self._ensure_model_loaded()
-                
-                # Resize for performance
+                # Resize if needed for performance
                 optimized = image_preprocessor.resize_if_needed(
                     image, 
                     max_dimension=self.max_dimension
                 )
                 
-                # FIX #9: Delete original image copy immediately
-                if image is not optimized:
-                    del image
+                # Save to temp file (PaddleOCR needs file path)
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    tmp_path = tmp.name
+                    optimized.save(tmp_path, 'PNG')
                 
-                logger.info(f"Processing image {page_number} ({optimized.size})...")
-                
-                output = self._generate_ocr(optimized)
-                
-                processing_time = int((time.time() - start_time) * 1000)
-                
-                # FIX #9: Cleanup optimized image
-                del optimized
-                
-                # FIX #1: Unload model after request if configured
-                if self.UNLOAD_AFTER_REQUEST:
-                    self._unload_model()
-                else:
-                    self._force_cleanup()
-                
-                if output.get("error"):
-                    return OCROutput(
-                        success=False,
-                        error=str(output["error"]),
-                        processing_time_ms=processing_time,
-                        page_number=page_number,
-                        image_width=original_size[0],
-                        image_height=original_size[1]
-                    )
-                
-                return OCROutput(
-                    markdown=output.get("markdown", ""),
-                    html=output.get("html", ""),
-                    processing_time_ms=processing_time,
-                    success=True,
-                    page_number=page_number,
-                    image_width=original_size[0],
-                    image_height=original_size[1]
-                )
+                try:
+                    logger.info(f"Processing image page {page_number} ({optimized.size})...")
+                    
+                    results = self._process_with_pipeline(tmp_path)
+                    
+                    processing_time = int((time.time() - start_time) * 1000)
+                    
+                    if results and not results[0].get('error'):
+                        result = results[0]
+                        return OCROutput(
+                            markdown=result['markdown'],
+                            html=result['html'],
+                            json_output=result['json'],
+                            processing_time_ms=processing_time,
+                            success=True,
+                            page_number=page_number,
+                            image_width=original_size[0],
+                            image_height=original_size[1],
+                            layout_boxes=result.get('layout_boxes', [])
+                        )
+                    else:
+                        error = results[0].get('error') if results else "No results"
+                        return OCROutput(
+                            success=False,
+                            error=error,
+                            processing_time_ms=processing_time,
+                            page_number=page_number,
+                            image_width=original_size[0],
+                            image_height=original_size[1]
+                        )
+                        
+                finally:
+                    # Cleanup temp file
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
                 
             except Exception as e:
                 processing_time = int((time.time() - start_time) * 1000)
                 logger.error(f"OCR failed: {e}", exc_info=True)
-                
-                # Always cleanup on error
-                self._unload_model()
                 
                 return OCROutput(
                     success=False,
@@ -592,8 +428,17 @@ class OCRService:
         image_source: Union[str, Path, Image.Image, bytes],
         page_number: int = 1
     ) -> OCROutput:
-        """Process image from various sources."""
-        # Load image
+        """
+        Process image from various sources synchronously.
+        
+        Args:
+            image_source: Image path, PIL Image, or bytes
+            page_number: Page number for this image
+            
+        Returns:
+            OCROutput with results
+        """
+        # Load image from various sources
         if isinstance(image_source, bytes):
             image = image_preprocessor.load_image_bytes(image_source)
         elif isinstance(image_source, (str, Path)):
@@ -603,11 +448,7 @@ class OCRService:
         else:
             raise ValueError(f"Unsupported image type: {type(image_source)}")
         
-        # FIX #9: Delete source reference if it was loaded
-        if isinstance(image_source, (str, Path, bytes)):
-            del image_source
-        
-        # Preprocess
+        # Preprocess image
         image = image_preprocessor.optimize_for_ocr(
             image,
             apply_contrast=True,
@@ -617,29 +458,138 @@ class OCRService:
         
         return self._process_single_image_sync(image, page_number)
     
+    # =========================================================================
+    # PDF PROCESSING
+    # =========================================================================
+    
     def process_pdf_sync(self, pdf_path: Union[str, Path]) -> DocumentOCRResult:
-        """Process PDF document."""
+        """
+        Process a PDF document synchronously.
+        
+        PaddleOCR-VL can process PDFs directly, handling multi-page documents
+        and concatenating results automatically.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            DocumentOCRResult with all pages
+        """
+        start_time = time.time()
+        pdf_path = Path(pdf_path)
+        
+        try:
+            if not pdf_path.exists():
+                return DocumentOCRResult(
+                    success=False,
+                    error=f"File not found: {pdf_path}"
+                )
+            
+            self._ensure_pipeline_loaded()
+            
+            logger.info(f"Processing PDF: {pdf_path.name}")
+            
+            # Process PDF directly with PaddleOCR
+            output = self._pipeline.predict(str(pdf_path))
+            
+            page_results: List[OCROutput] = []
+            markdown_list = []
+            
+            page_num = 0
+            for res in output:
+                page_num += 1
+                page_start = time.time()
+                
+                # Extract markdown
+                md_info = res.markdown
+                markdown_text = md_info.get("markdown_text", "") if isinstance(md_info, dict) else ""
+                markdown_list.append(md_info)
+                
+                # Extract JSON
+                json_data = res.json if hasattr(res, 'json') else {}
+                
+                # Extract layout boxes
+                layout_boxes = []
+                if hasattr(res, 'json') and isinstance(res.json, dict):
+                    layout_det = res.json.get('layout_det_res', {})
+                    if isinstance(layout_det, dict):
+                        boxes = layout_det.get('boxes', [])
+                        for box in boxes:
+                            layout_boxes.append({
+                                'label': box.get('label', ''),
+                                'score': float(box.get('score', 0)),
+                                'coordinate': [float(c) for c in box.get('coordinate', [])]
+                            })
+                
+                # Generate HTML
+                html_content = self._generate_html_from_result(res)
+                
+                page_time = int((time.time() - page_start) * 1000)
+                
+                page_results.append(OCROutput(
+                    markdown=markdown_text,
+                    html=html_content,
+                    json_output=json_data,
+                    processing_time_ms=page_time,
+                    success=True,
+                    page_number=page_num,
+                    layout_boxes=layout_boxes
+                ))
+                
+                logger.info(f"  Page {page_num} processed ({page_time}ms)")
+            
+            # Concatenate all markdown pages
+            combined_md = self._pipeline.concatenate_markdown_pages(markdown_list)
+            combined_html = self._combine_html(page_results)
+            
+            total_time = int((time.time() - start_time) * 1000)
+            all_success = all(p.success for p in page_results)
+            
+            return DocumentOCRResult(
+                pages=page_results,
+                total_pages=len(page_results),
+                total_processing_time_ms=total_time,
+                success=all_success,
+                error=None if all_success else "Some pages failed",
+                combined_markdown=combined_md,
+                combined_html=combined_html
+            )
+            
+        except Exception as e:
+            total_time = int((time.time() - start_time) * 1000)
+            logger.error(f"PDF processing failed: {e}", exc_info=True)
+            return DocumentOCRResult(
+                success=False,
+                error=str(e),
+                total_processing_time_ms=total_time
+            )
+    
+    def process_pdf_as_images_sync(self, pdf_path: Union[str, Path]) -> DocumentOCRResult:
+        """
+        Alternative: Process PDF by converting to images first.
+        
+        This can be more reliable for some PDFs but is slower.
+        Use process_pdf_sync() for better performance.
+        """
         start_time = time.time()
         
         try:
             images = image_preprocessor.pdf_to_images(pdf_path)
             
             if not images:
-                return DocumentOCRResult(success=False, error="No pages found")
+                return DocumentOCRResult(success=False, error="No pages found in PDF")
             
             page_results: List[OCROutput] = []
+            
             for i, page_image in enumerate(images, start=1):
                 logger.info(f"Processing PDF page {i}/{len(images)}")
                 result = self._process_single_image_sync(page_image, i)
                 page_results.append(result)
                 
-                # FIX #9: Delete page image immediately
+                # Free memory
                 del page_image
-                
-                # FIX #7: Check memory between pages
-                self._check_memory_and_cleanup()
+                gc.collect()
             
-            # FIX #9: Delete images list
             del images
             
             combined_md = self._combine_markdown(page_results)
@@ -661,7 +611,6 @@ class OCRService:
         except Exception as e:
             total_time = int((time.time() - start_time) * 1000)
             logger.error(f"PDF processing failed: {e}")
-            self._unload_model()
             return DocumentOCRResult(
                 success=False,
                 error=str(e),
@@ -678,14 +627,13 @@ class OCRService:
         page_number: int = 1,
         timeout: float = 900.0  # 15 min for slow CPU
     ) -> OCROutput:
-        """Async image processing."""
+        """Async wrapper for image processing."""
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self.process_image_sync, image_source, page_number),
                 timeout=timeout
             )
         except asyncio.TimeoutError:
-            self._unload_model()
             return OCROutput(success=False, error=f"Timed out after {timeout}s")
     
     async def process_pdf(
@@ -693,14 +641,13 @@ class OCRService:
         pdf_path: Union[str, Path],
         timeout: float = 3600.0  # 1 hour for multi-page PDFs
     ) -> DocumentOCRResult:
-        """Async PDF processing."""
+        """Async wrapper for PDF processing."""
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self.process_pdf_sync, pdf_path),
                 timeout=timeout
             )
         except asyncio.TimeoutError:
-            self._unload_model()
             return DocumentOCRResult(success=False, error=f"Timed out after {timeout}s")
     
     async def process_document(
@@ -708,7 +655,16 @@ class OCRService:
         file_path: Union[str, Path],
         file_type: str
     ) -> DocumentOCRResult:
-        """Process any document type."""
+        """
+        Process any supported document type.
+        
+        Args:
+            file_path: Path to document
+            file_type: File extension (pdf, png, jpg, jpeg)
+            
+        Returns:
+            DocumentOCRResult with all pages
+        """
         file_type = file_type.lower().strip('.')
         path = Path(file_path)
         
@@ -717,7 +673,7 @@ class OCRService:
         
         if file_type == 'pdf':
             return await self.process_pdf(path)
-        elif file_type in ('png', 'jpg', 'jpeg'):
+        elif file_type in ('png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff'):
             result = await self.process_image(path)
             return DocumentOCRResult(
                 pages=[result],
@@ -729,13 +685,14 @@ class OCRService:
                 combined_html=result.html
             )
         else:
-            return DocumentOCRResult(success=False, error=f"Unsupported: {file_type}")
+            return DocumentOCRResult(success=False, error=f"Unsupported file type: {file_type}")
     
     # =========================================================================
     # HELPERS
     # =========================================================================
     
     def _combine_markdown(self, pages: List[OCROutput]) -> str:
+        """Combine markdown from multiple pages."""
         sections = []
         for page in pages:
             if page.markdown:
@@ -746,6 +703,7 @@ class OCRService:
         return "\n\n---\n\n".join(sections)
     
     def _combine_html(self, pages: List[OCROutput]) -> str:
+        """Combine HTML from multiple pages."""
         sections = []
         for page in pages:
             if page.html:
@@ -756,27 +714,32 @@ class OCRService:
         return "\n<hr>\n".join(sections)
     
     def get_status(self) -> Dict[str, Any]:
+        """Get service status information."""
         return {
             "model_loaded": self._model_loaded,
-            "mode": "cpu" if self._use_cpu_mode else "gpu",
-            "device": self._device,
-            "memory_usage": f"{self._get_memory_usage()*100:.1f}%",
-            "max_memory": self.MAX_CPU_MEMORY,
-            "unload_after_request": self.UNLOAD_AFTER_REQUEST,
-            "4bit_quantization": self.USE_4BIT_QUANTIZATION
+            "model_name": "PaddleOCR-VL-0.9B",
+            "mode": "gpu" if self._is_gpu else "cpu",
+            "device": self._device or "not_loaded",
+            "use_layout_detection": self.use_layout_detection,
+            "use_doc_orientation_classify": self.use_doc_orientation_classify,
+            "use_doc_unwarping": self.use_doc_unwarping,
+            "use_chart_recognition": self.use_chart_recognition,
+            "max_dimension": self.max_dimension,
+            "engine": "PaddleOCR-VL"
         }
     
     def preload_model(self) -> None:
-        """Preload model (not recommended for memory-constrained systems)."""
-        self._ensure_model_loaded()
+        """Preload model at startup."""
+        self._ensure_pipeline_loaded()
     
     @property
     def is_model_loaded(self) -> bool:
+        """Check if model is loaded."""
         return self._model_loaded
     
     def cleanup(self) -> None:
         """Full cleanup."""
-        self._unload_model()
+        self._unload_pipeline()
         if self._executor:
             self._executor.shutdown(wait=False)
         logger.info("OCR Service cleaned up")
@@ -817,7 +780,7 @@ async def ocr_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def preload_ocr_model() -> None:
-    """Preload model at startup (not recommended for 8GB systems)."""
+    """Preload model at startup."""
     try:
         ocr_service.preload_model()
     except Exception as e:

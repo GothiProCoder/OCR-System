@@ -1,0 +1,126 @@
+/* 
+  Lumina Design System - Global Styles 
+  Theme: Light / Clean / Professional
+*/
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+/* --- Global Reset & Font --- */
+html,
+body,
+[class*="css"] {
+  font-family: "Inter", sans-serif !important;
+  background-color: #f8fafc;
+  color: #4f5569;
+}
+
+/* Hiding Streamlit Branding */
+#MainMenu {
+  visibility: hidden;
+}
+footer {
+  visibility: hidden;
+}
+header {
+  visibility: hidden;
+}
+
+/* --- Headings --- */
+h1,
+h2,
+h3 {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.025em;
+}
+
+h1 {
+  font-size: 2.25rem !important;
+}
+h2 {
+  font-size: 1.5rem !important;
+  margin-top: 1.5rem !important;
+}
+h3 {
+  font-size: 1.125rem !important;
+}
+
+/* --- Buttons (Primary) --- */
+.stButton > button {
+  background-color: #4f46e5 !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 0.75rem !important;
+  padding: 0.5rem 1rem !important;
+  font-weight: 500 !important;
+  box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.2),
+    0 2px 4px -1px rgba(79, 70, 229, 0.1) !important;
+  transition: all 0.2s ease-in-out !important;
+}
+
+.stButton > button:hover {
+  background-color: #4338ca !important; /* Indigo-700 */
+  box-shadow: 0 10px 15px -3px rgba(79, 70, 229, 0.3) !important;
+  transform: translateY(-2px);
+}
+
+.stButton > button:active {
+  transform: translateY(0);
+}
+
+/* --- Secondary / Outline Buttons (Custom Class) --- */
+/* Usage: st.markdown('<div class="secondary-btn">', unsafe_allow_html=True) ... */
+
+/* --- Card Containers --- */
+.lumina-card {
+  background-color: #ffffff;
+  border-radius: 1rem;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  border: 1px solid #e2e8f0; /* Slate-200 */
+  margin-bottom: 1.5rem;
+  transition: box-shadow 0.2s;
+}
+
+.lumina-card:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1),
+    0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+/* --- Metric Cards --- */
+[data-testid="stMetric"] {
+  background-color: #ffffff;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+
+[data-testid="stMetricValue"] {
+  color: #4f46e5 !important;
+  font-weight: 700 !important;
+}
+
+/* --- Dataframes & Tables --- */
+[data-testid="stDataFrame"] {
+  border-radius: 0.75rem;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  background: white;
+}
+
+/* --- Animations --- */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.5s ease-out forwards;
+}
