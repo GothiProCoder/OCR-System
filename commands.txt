@@ -1,0 +1,15 @@
+pip install -r requirements.txt
+
+# Setup Database
+python scripts/init_db.py
+
+# Alembic upgrade
+cd backend
+alembic upgrade head
+
+# Run Backend in One Terminal
+cd backend
+python -m uvicorn main:app --port 8000
+
+# Run Streamlit Frontend in Another Terminal
+python -m streamlit run frontend/app.py
