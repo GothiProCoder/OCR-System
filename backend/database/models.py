@@ -357,6 +357,23 @@ class Extraction(Base):
         comment="LLM extraction time in milliseconds"
     )
     
+    # Bounding Box Data (for frontend highlighting)
+    layout_data = Column(
+        JSONB,
+        default=list,
+        comment="All bounding boxes from OCR (words, lines, tables)"
+    )
+    processed_image_paths = Column(
+        JSONB,
+        default=dict,
+        comment="Paths to processed images by page: {'1': 'path/to/page1.jpg'}"
+    )
+    page_dimensions = Column(
+        JSONB,
+        default=dict,
+        comment="Page dimensions: {page_num: {width, height, unit}}"
+    )
+    
     # Finalization
     is_finalized = Column(
         Boolean, 
@@ -481,10 +498,18 @@ class ExtractedField(Base):
         comment="Original value before editing"
     )
     
-    # Position Information
-    bounding_box = Column(
+    # Position Information - Key and Value Bounding Boxes
+    key_bbox = Column(
         JSONB,
-        comment="Position: {x, y, width, height, page}"
+        comment="Key bounding box: {polygon, matched_text, confidence, page}"
+    )
+    value_bbox = Column(
+        JSONB,
+        comment="Value bounding box: {polygon, matched_text, confidence, page}"
+    )
+    original_ocr_text = Column(
+        Text,
+        comment="Original OCR text used for bbox matching (preserved on user edit)"
     )
     page_number = Column(
         Integer, 

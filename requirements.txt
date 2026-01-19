@@ -36,9 +36,13 @@ psycopg2-binary
 asyncpg
 alembic
 
-# ===== OCR Engine (PaddleOCR-VL) =====
-# Note: PaddlePaddle must be installed first (see instructions above)
-paddleocr[doc-parser]
+# ===== OCR Engine (Azure Document Intelligence) =====
+azure-ai-documentintelligence
+azure-core
+
+# ===== Image Preprocessing =====
+opencv-python
+numpy
 Pillow
 pdf2image
 

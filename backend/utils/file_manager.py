@@ -259,6 +259,59 @@ class FileManager:
         
         return file_path
     
+    def save_processed_image(
+        self, 
+        image_bytes: bytes,
+        document_id: str,
+        page_number: int = 1
+    ) -> Tuple[Path, str]:
+        """
+        Save processed (deskewed/compressed) image for bounding box overlay.
+        
+        Images are saved with document_id in filename for easy retrieval.
+        Used by frontend to display image with bounding box highlights.
+        
+        Args:
+            image_bytes: Processed JPEG image bytes
+            document_id: Document UUID as string
+            page_number: Page number for multi-page documents
+            
+        Returns:
+            Tuple of (full_path, relative_path)
+        """
+        # Use document ID and page for unique naming
+        filename = f"{document_id}_page{page_number}.jpg"
+        
+        # Save directly to processed_dir (no date subdir for easy lookup)
+        file_path = self.processed_dir / filename
+        file_path.write_bytes(image_bytes)
+        
+        relative_path = self.get_relative_path(file_path)
+        
+        return file_path, relative_path
+    
+    def get_processed_image_path(
+        self, 
+        document_id: str,
+        page_number: int = 1
+    ) -> Optional[Path]:
+        """
+        Get path to processed image for a document.
+        
+        Args:
+            document_id: Document UUID as string
+            page_number: Page number (1-indexed)
+            
+        Returns:
+            Path to processed image, or None if not found
+        """
+        filename = f"{document_id}_page{page_number}.jpg"
+        file_path = self.processed_dir / filename
+        
+        if file_path.exists():
+            return file_path
+        return None
+    
     def save_export(
         self, 
         content: bytes,

@@ -54,31 +54,58 @@ class ExtractionStatus(str, Enum):
 
 
 # =============================================================================
-# BOUNDING BOX SCHEMA
+# BOUNDING BOX SCHEMAS
 # =============================================================================
 
-class BoundingBox(BaseModel):
-    """Position of extracted field on document"""
+class FieldBoundingBox(BaseModel):
+    """
+    Polygon-based bounding box for KEY or VALUE highlighting.
     
-    x: float = Field(..., ge=0, description="X coordinate (pixels or %)")
-    y: float = Field(..., ge=0, description="Y coordinate (pixels or %)")
-    width: float = Field(..., gt=0, description="Width")
-    height: float = Field(..., gt=0, description="Height")
-    page: int = Field(1, ge=1, description="Page number (1-indexed)")
-    unit: str = Field("pixel", description="Unit type: 'pixel' or 'percent'")
+    Uses polygon coordinates from Azure Document Intelligence output.
+    Supports fuzzy-matched text with confidence score.
+    """
+    
+    polygon: List[float] = Field(
+        default_factory=list,
+        description="Polygon coordinates [x1,y1, x2,y2, x3,y3, x4,y4] in inches"
+    )
+    matched_text: str = Field(
+        "",
+        description="The OCR text that was matched to this field"
+    )
+    confidence: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Match confidence score (1.0 = exact, 0.85+ = fuzzy match)"
+    )
+    page: int = Field(
+        1,
+        ge=1,
+        description="Page number (1-indexed)"
+    )
     
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "x": 120.5,
-                "y": 340.0,
-                "width": 200.0,
-                "height": 25.0,
-                "page": 1,
-                "unit": "pixel"
+                "polygon": [1.2, 2.3, 3.4, 2.3, 3.4, 2.8, 1.2, 2.8],
+                "matched_text": "John Smith",
+                "confidence": 0.95,
+                "page": 1
             }
         }
     )
+
+
+# Legacy BoundingBox for backwards compatibility (deprecated)
+class BoundingBox(BaseModel):
+    """DEPRECATED: Use FieldBoundingBox instead"""
+    x: float = Field(0, ge=0)
+    y: float = Field(0, ge=0)
+    width: float = Field(0, ge=0)
+    height: float = Field(0, ge=0)
+    page: int = Field(1, ge=1)
+    unit: str = Field("pixel")
 
 
 # =============================================================================
@@ -113,7 +140,9 @@ class ExtractedFieldBase(BaseModel):
 class ExtractedFieldCreate(ExtractedFieldBase):
     """Schema for creating extracted fields (internal use)"""
     
-    bounding_box: Optional[BoundingBox] = None
+    key_bbox: Optional[FieldBoundingBox] = None
+    value_bbox: Optional[FieldBoundingBox] = None
+    original_ocr_text: Optional[str] = Field(None, description="Original OCR text for bbox matching")
     page_number: int = Field(1, ge=1)
     sort_order: int = Field(0, ge=0)
     custom_metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -131,7 +160,11 @@ class ExtractedFieldResponse(ExtractedFieldBase):
     is_edited: bool = Field(False, description="Was manually edited")
     original_value: Optional[str] = Field(None, description="Value before editing")
     
-    bounding_box: Optional[BoundingBox] = None
+    # Bounding boxes for KEY and VALUE highlighting
+    key_bbox: Optional[FieldBoundingBox] = Field(None, description="Bounding box for field key/label")
+    value_bbox: Optional[FieldBoundingBox] = Field(None, description="Bounding box for field value")
+    original_ocr_text: Optional[str] = Field(None, description="Original OCR text (preserved on edit)")
+    
     page_number: int = Field(1)
     sort_order: int = Field(0)
     custom_metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -317,6 +350,20 @@ class ExtractionResponse(BaseModel):
     fields: List[ExtractedFieldResponse] = Field(
         default_factory=list,
         description="Extracted key-value pairs"
+    )
+    
+    # Bounding Box Data (for frontend highlighting)
+    layout_data: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="All bounding boxes from OCR (words, lines, tables)"
+    )
+    processed_image_paths: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Paths to processed images by page number"
+    )
+    page_dimensions: Dict[str, Dict[str, float]] = Field(
+        default_factory=dict,
+        description="Page dimensions: {page_num: {width, height}}"
     )
     
     # Timestamps

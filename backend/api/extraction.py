@@ -175,6 +175,10 @@ def extraction_to_response(extraction: Extraction) -> ExtractionResponse:
             validation_message=f.validation_message,
             is_edited=f.is_edited or False,
             original_value=f.original_value,
+            # Bounding box data for KEY and VALUE highlighting
+            key_bbox=f.key_bbox,
+            value_bbox=f.value_bbox,
+            original_ocr_text=f.original_ocr_text,
             page_number=f.page_number or 1,
             created_at=f.created_at,
             updated_at=f.updated_at
@@ -201,6 +205,10 @@ def extraction_to_response(extraction: Extraction) -> ExtractionResponse:
         is_finalized=extraction.is_finalized or False,
         finalized_at=extraction.finalized_at,
         fields=fields,
+        # Bounding box data for frontend highlighting
+        layout_data=extraction.layout_data or [],
+        processed_image_paths=extraction.processed_image_paths or {},
+        page_dimensions=extraction.page_dimensions or {},
         created_at=extraction.created_at,
         updated_at=extraction.updated_at
     )

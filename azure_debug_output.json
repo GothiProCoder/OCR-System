@@ -1,0 +1,176 @@
+{
+  "success": true,
+  "total_pages": 1,
+  "combined_layout_boxes_count": 69,
+  "combined_layout_boxes_sample": [
+    {
+      "type": "word",
+      "content": "SPRINGFIELD",
+      "confidence": 0.993,
+      "polygon": [
+        385.0,
+        148.0,
+        692.0,
+        162.0,
+        689.0,
+        196.0,
+        383.0,
+        183.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "UNIVERSITY",
+      "confidence": 0.993,
+      "polygon": [
+        718.0,
+        163.0,
+        965.0,
+        174.0,
+        963.0,
+        209.0,
+        715.0,
+        197.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "-",
+      "confidence": 0.774,
+      "polygon": [
+        982.0,
+        174.0,
+        1001.0,
+        175.0,
+        999.0,
+        210.0,
+        980.0,
+        209.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "UNDERGRADUATE",
+      "confidence": 0.992,
+      "polygon": [
+        1018.0,
+        176.0,
+        1378.0,
+        192.0,
+        1378.0,
+        225.0,
+        1016.0,
+        211.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "ADMISSION",
+      "confidence": 0.992,
+      "polygon": [
+        633.0,
+        202.0,
+        873.0,
+        211.0,
+        871.0,
+        245.0,
+        630.0,
+        236.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "APPLICATION",
+      "confidence": 0.894,
+      "polygon": [
+        900.0,
+        212.0,
+        1182.0,
+        223.0,
+        1181.0,
+        255.0,
+        898.0,
+        246.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "Applicant",
+      "confidence": 0.985,
+      "polygon": [
+        351.0,
+        291.0,
+        540.0,
+        294.0,
+        539.0,
+        328.0,
+        351.0,
+        326.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "Name:",
+      "confidence": 0.983,
+      "polygon": [
+        547.0,
+        294.0,
+        671.0,
+        295.0,
+        671.0,
+        330.0,
+        546.0,
+        329.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "एमिली",
+      "confidence": 0.993,
+      "polygon": [
+        698.0,
+        283.0,
+        847.0,
+        285.0,
+        845.0,
+        333.0,
+        697.0,
+        330.0
+      ],
+      "page_number": 1
+    },
+    {
+      "type": "word",
+      "content": "एस.",
+      "confidence": 0.963,
+      "polygon": [
+        870.0,
+        285.0,
+        966.0,
+        287.0,
+        965.0,
+        335.0,
+        868.0,
+        334.0
+      ],
+      "page_number": 1
+    }
+  ],
+  "pages": [
+    {
+      "page_number": 1,
+      "layout_boxes_count": 69,
+      "has_processed_image": true,
+      "page_width_inches": 2000.0,
+      "page_height_inches": 1090.0
+    }
+  ]
+}

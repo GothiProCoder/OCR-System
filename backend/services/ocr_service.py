@@ -1,22 +1,23 @@
 """
-OCR Service - PaddleOCR-VL Implementation
-==========================================
-Complete rewrite using PaddleOCR-VL for document parsing.
+OCR Service - Azure Document Intelligence Implementation
+=========================================================
+Document parsing using Azure AI Document Intelligence (formerly Form Recognizer).
 
 Features:
-- Page-level document parsing with layout detection
-- Element-level recognition (text, tables, formulas, charts)
-- 109 language support
-- Native Markdown/JSON/HTML output
-- CPU and GPU support
-- ~2.5GB VRAM (vs Chandra's 8GB+)
+- Cloud-based OCR with high accuracy
+- Markdown output for seamless LLM integration
+- Table, paragraph, and word-level extraction
+- Bounding box data for frontend visualization
+- Built-in preprocessing (deskew, compression)
+- PDF and image support
 
-Architecture:
-- PP-DocLayoutV2: Layout detection and reading order
-- PaddleOCR-VL-0.9B: Vision-Language model for recognition
+Azure Model Options:
+- prebuilt-layout: Full extraction (text, tables, figures, structure)
+- prebuilt-read: Fast text-only extraction
 
-Note: Requires NumPy < 2.0 for compatibility with PaddleOCR-VL.
-Run: pip install "numpy<2.0.0" if you get scalar conversion errors.
+Requires:
+- azure-ai-documentintelligence package
+- Azure Document Intelligence resource credentials in .env
 """
 
 from pathlib import Path
@@ -29,8 +30,6 @@ import threading
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import gc
-import os
-import tempfile
 import io
 
 import sys
@@ -59,6 +58,9 @@ class OCROutput:
     image_width: int = 0
     image_height: int = 0
     layout_boxes: List[Dict[str, Any]] = field(default_factory=list)
+    processed_image_bytes: Optional[bytes] = None  # Preprocessed image for frontend
+    page_width_inches: float = 0.0  # Azure page dimensions
+    page_height_inches: float = 0.0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -71,7 +73,9 @@ class OCROutput:
             "page_number": self.page_number,
             "image_width": self.image_width,
             "image_height": self.image_height,
-            "layout_boxes": self.layout_boxes
+            "layout_boxes": self.layout_boxes,
+            "page_width_inches": self.page_width_inches,
+            "page_height_inches": self.page_height_inches,
         }
 
 
@@ -85,6 +89,7 @@ class DocumentOCRResult:
     error: Optional[str] = None
     combined_markdown: str = ""
     combined_html: str = ""
+    combined_layout_boxes: List[Dict[str, Any]] = field(default_factory=list)  # All pages' boxes
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -94,29 +99,28 @@ class DocumentOCRResult:
             "success": self.success,
             "error": self.error,
             "combined_markdown": self.combined_markdown,
-            "combined_html": self.combined_html
+            "combined_html": self.combined_html,
+            "combined_layout_boxes": self.combined_layout_boxes,
         }
 
 
 # =============================================================================
-# OCR SERVICE - PaddleOCR-VL Implementation
+# OCR SERVICE - Azure Document Intelligence Implementation
 # =============================================================================
 
 class OCRService:
     """
-    PaddleOCR-VL Document Parsing Service.
+    Azure Document Intelligence OCR Service.
     
     Features:
-    - Full page-level document parsing with layout detection
-    - Element-level recognition (text, tables, formulas, charts)
-    - Native Markdown/JSON/HTML output
-    - CPU and GPU support (auto-detect)
-    - Lazy model loading (loads on first use)
+    - Cloud-based processing (no local GPU needed)
+    - Markdown output with tables
+    - Bounding boxes for UI overlay
+    - Built-in preprocessing pipeline
     
-    Model Info:
-    - PaddleOCR-VL-0.9B: 0.9 billion parameters
-    - VRAM requirement: ~2.5GB GPU or ~5GB RAM for CPU
-    - Inference time: 2-3 seconds/page on GPU, 30-60 seconds on CPU
+    Azure Requirements:
+    - AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT in .env
+    - AZURE_DOCUMENT_INTELLIGENCE_KEY in .env
     """
     
     _instance = None
@@ -134,217 +138,258 @@ class OCRService:
         if getattr(self, '_initialized', False):
             return
         
-        self._pipeline = None
-        self._model_loaded = False
-        self._model_lock = threading.Lock()
-        self._device = None
-        self._is_gpu = False
+        self._client = None
+        self._client_lock = threading.Lock()
+        
+        # Configuration from settings
+        self._endpoint = getattr(settings, 'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT', '')
+        self._api_key = getattr(settings, 'AZURE_DOCUMENT_INTELLIGENCE_KEY', '')
+        self._model_id = getattr(settings, 'AZURE_DOCUMENT_INTELLIGENCE_MODEL', 'prebuilt-layout')
+        
+        # Preprocessing settings
+        self._apply_deskew = getattr(settings, 'PREPROCESSING_APPLY_DESKEW', True)
+        self._apply_binarize = getattr(settings, 'PREPROCESSING_APPLY_BINARIZE', False)
+        self._target_size_mb = getattr(settings, 'PREPROCESSING_TARGET_SIZE_MB', 2.0)
+        self.max_dimension = getattr(settings, 'OCR_MAX_IMAGE_DIMENSION', 2000)
         
         # Single worker for sequential processing
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._semaphore = threading.Semaphore(1)
         
-        # Configuration from settings
-        self.max_dimension = getattr(settings, 'OCR_MAX_IMAGE_DIMENSION', 2000)
-        self.use_layout_detection = getattr(settings, 'PADDLEOCR_USE_LAYOUT_DETECTION', True)
-        self.use_doc_orientation_classify = getattr(settings, 'PADDLEOCR_USE_DOC_ORIENTATION', False)
-        self.use_doc_unwarping = getattr(settings, 'PADDLEOCR_USE_DOC_UNWARPING', False)
-        self.use_chart_recognition = getattr(settings, 'PADDLEOCR_USE_CHART_RECOGNITION', False)
-        self._configured_device = getattr(settings, 'PADDLEOCR_DEVICE', '') or None
-        
         self._initialized = True
-        logger.info("OCR Service initialized (PaddleOCR-VL mode)")
+        logger.info(f"OCR Service initialized (Azure Document Intelligence mode, model: {self._model_id})")
     
     # =========================================================================
-    # HARDWARE DETECTION
+    # CLIENT MANAGEMENT
     # =========================================================================
     
-    def _detect_hardware(self) -> Dict[str, Any]:
-        """Detect available hardware (CPU/GPU)."""
-        # Use configured device if specified
-        if self._configured_device:
-            is_gpu = self._configured_device.startswith('gpu')
-            return {
-                'gpu_available': is_gpu,
-                'gpu_count': 1 if is_gpu else 0,
-                'device': self._configured_device
-            }
-        
-        # Auto-detect hardware
-        try:
-            import paddle
-            gpu_available = paddle.is_compiled_with_cuda()
-            
-            if gpu_available:
-                try:
-                    gpu_count = paddle.device.cuda.device_count()
-                except:
-                    gpu_count = 0
-                    gpu_available = False
-            else:
-                gpu_count = 0
-            
-            return {
-                'gpu_available': gpu_available,
-                'gpu_count': gpu_count,
-                'device': 'gpu:0' if gpu_available else 'cpu'
-            }
-        except ImportError:
-            logger.warning("PaddlePaddle not imported yet, assuming CPU")
-            return {
-                'gpu_available': False,
-                'gpu_count': 0,
-                'device': 'cpu'
-            }
-    
-    # =========================================================================
-    # MODEL LOADING
-    # =========================================================================
-    
-    def _ensure_pipeline_loaded(self) -> None:
-        """Lazy-load PaddleOCR-VL pipeline on first use."""
-        if self._model_loaded:
+    def _ensure_client_initialized(self) -> None:
+        """Lazy-load Azure Document Intelligence client."""
+        if self._client is not None:
             return
         
-        with self._model_lock:
-            if self._model_loaded:
+        with self._client_lock:
+            if self._client is not None:
                 return
             
-            logger.info("=" * 60)
-            logger.info("LOADING PaddleOCR-VL Pipeline")
-            logger.info("This may take a few minutes on first run (downloading models)...")
-            logger.info("=" * 60)
+            if not self._endpoint or not self._api_key:
+                raise ValueError(
+                    "Azure Document Intelligence credentials not configured. "
+                    "Set AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and "
+                    "AZURE_DOCUMENT_INTELLIGENCE_KEY in your .env file."
+                )
             
-            start_time = time.time()
+            logger.info("=" * 60)
+            logger.info("INITIALIZING Azure Document Intelligence Client")
+            logger.info(f"Endpoint: {self._endpoint[:50]}...")
+            logger.info(f"Model: {self._model_id}")
+            logger.info("=" * 60)
             
             try:
-                from paddleocr import PaddleOCRVL
+                from azure.core.credentials import AzureKeyCredential
+                from azure.ai.documentintelligence import DocumentIntelligenceClient
                 
-                # Detect hardware
-                hw = self._detect_hardware()
-                self._device = hw['device']
-                self._is_gpu = hw['gpu_available']
-                
-                logger.info(f"Device: {self._device}")
-                logger.info(f"GPU Available: {self._is_gpu}")
-                
-                # Initialize pipeline with configured settings
-                self._pipeline = PaddleOCRVL(
-                    device=self._device,
-                    use_layout_detection=self.use_layout_detection,
-                    use_doc_orientation_classify=self.use_doc_orientation_classify,
-                    use_doc_unwarping=self.use_doc_unwarping,
-                    use_chart_recognition=self.use_chart_recognition,
+                self._client = DocumentIntelligenceClient(
+                    endpoint=self._endpoint,
+                    credential=AzureKeyCredential(self._api_key)
                 )
                 
-                elapsed = time.time() - start_time
-                self._model_loaded = True
-                
-                logger.info(f"PaddleOCR-VL loaded successfully in {elapsed:.1f}s")
-                logger.info("=" * 60)
+                logger.info("Azure Document Intelligence client initialized successfully")
                 
             except ImportError as e:
-                logger.error(f"PaddleOCR not installed: {e}")
-                logger.error("Please install: pip install paddleocr[doc-parser]")
-                raise RuntimeError(f"PaddleOCR not installed: {e}")
-            
+                logger.error(f"Azure SDK not installed: {e}")
+                raise RuntimeError(
+                    "Azure Document Intelligence SDK not installed. "
+                    "Run: pip install azure-ai-documentintelligence"
+                )
             except Exception as e:
-                logger.error(f"Failed to load PaddleOCR-VL: {e}")
-                raise RuntimeError(f"Failed to load PaddleOCR-VL: {e}")
-    
-    def _unload_pipeline(self) -> None:
-        """Unload pipeline to free memory (optional)."""
-        with self._model_lock:
-            if self._pipeline is not None:
-                logger.info("Unloading PaddleOCR-VL pipeline...")
-                del self._pipeline
-                self._pipeline = None
-                self._model_loaded = False
-                gc.collect()
-                logger.info("Pipeline unloaded")
+                logger.error(f"Failed to initialize Azure client: {e}")
+                raise
     
     # =========================================================================
-    # CORE PROCESSING
+    # CORE AZURE PROCESSING
     # =========================================================================
     
-    def _process_with_pipeline(self, input_path: str) -> List[Dict[str, Any]]:
+    def _analyze_with_azure(self, file_bytes: bytes) -> Dict[str, Any]:
         """
-        Run PaddleOCR-VL pipeline on input.
+        Call Azure Document Intelligence API.
         
         Args:
-            input_path: Path to image or PDF file
+            file_bytes: Document bytes (JPEG for images, PDF for PDFs)
             
         Returns:
-            List of result dictionaries (one per page)
+            Parsed AnalyzeResult as dictionary
         """
-        self._ensure_pipeline_loaded()
-        
-        results = []
+        self._ensure_client_initialized()
         
         try:
-            output = self._pipeline.predict(input_path)
+            from azure.ai.documentintelligence.models import DocumentContentFormat
             
-            for res in output:
-                # Extract markdown
-                md_info = res.markdown
-                markdown_text = md_info.get("markdown_text", "") if isinstance(md_info, dict) else ""
-                
-                # Extract JSON
-                json_data = res.json if hasattr(res, 'json') else {}
-                
-                # Extract layout boxes if available
-                layout_boxes = []
-                if hasattr(res, 'json') and isinstance(res.json, dict):
-                    layout_det = res.json.get('layout_det_res', {})
-                    if isinstance(layout_det, dict):
-                        boxes = layout_det.get('boxes', [])
-                        for box in boxes:
-                            layout_boxes.append({
-                                'label': box.get('label', ''),
-                                'score': float(box.get('score', 0)),
-                                'coordinate': [float(c) for c in box.get('coordinate', [])]
-                            })
-                
-                # Generate HTML (save to temp and read)
-                html_content = self._generate_html_from_result(res)
-                
-                results.append({
-                    'markdown': markdown_text,
-                    'html': html_content,
-                    'json': json_data,
-                    'layout_boxes': layout_boxes,
-                    'error': None
-                })
-                
+            logger.info(f"Sending {len(file_bytes)/1024:.1f}KB to Azure...")
+            
+            # Analyze with Markdown output format
+            poller = self._client.begin_analyze_document(
+                self._model_id,
+                body=file_bytes,
+                output_content_format=DocumentContentFormat.MARKDOWN,
+                content_type="application/octet-stream"
+            )
+            
+            result = poller.result()
+            
+            logger.info(f"Azure analysis complete: {len(result.pages)} pages")
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"Pipeline processing failed: {e}")
-            results.append({
-                'markdown': '',
-                'html': '',
-                'json': {},
-                'layout_boxes': [],
-                'error': str(e)
-            })
-        
-        return results
+            logger.error(f"Azure API error: {e}")
+            raise
     
-    def _generate_html_from_result(self, res) -> str:
-        """Generate HTML from PaddleOCR result."""
+    def _extract_layout_boxes(self, result, page_number: int = 1) -> List[Dict[str, Any]]:
+        """
+        Extract bounding boxes from Azure result for frontend visualization.
+        
+        Extracts:
+        - Words with confidence and polygons
+        - Lines with text
+        - Tables with cell positions
+        - Paragraphs with roles
+        """
+        layout_boxes = []
+        
         try:
-            # Create temp directory for HTML output
-            with tempfile.TemporaryDirectory() as tmpdir:
-                res.save_to_html(save_path=tmpdir)
-                
-                # Find the generated HTML file
-                html_files = list(Path(tmpdir).glob("*.html"))
-                if html_files:
-                    with open(html_files[0], 'r', encoding='utf-8') as f:
-                        return f.read()
+            # Get the specific page
+            if not result.pages or page_number > len(result.pages):
+                return layout_boxes
             
-            return ""
+            page = result.pages[page_number - 1]
+            
+            # Helper function to safely extract polygon coordinates
+            def extract_polygon(polygon) -> List[float]:
+                """Extract polygon coordinates - Azure returns flat list of floats."""
+                if not polygon:
+                    return []
+                try:
+                    # Azure already returns [x1, y1, x2, y2, ...] as floats
+                    coords = list(polygon)
+                    
+                    # Validate: should have even number of coordinates (x,y pairs)
+                    if len(coords) % 2 != 0:
+                        logger.warning(f"Polygon has odd number of coordinates: {len(coords)}")
+                    
+                    return coords
+                except Exception as e:
+                    logger.error(f"Error extracting polygon: {e}. Type: {type(polygon)}")
+                    return []
+            
+            # Extract words
+            if page.words:
+                logger.info(f"Page {page_number}: Extracting {len(page.words)} words")
+                # Log first word polygon as sample
+                if len(page.words) > 0:
+                    first_word = page.words[0]
+                    logger.debug(f"Sample word polygon - Type: {type(first_word.polygon)}, Length: {len(list(first_word.polygon)) if first_word.polygon else 0}")
+                
+                for word in page.words:
+                    polygon_coords = extract_polygon(word.polygon)
+                    layout_boxes.append({
+                        "type": "word",
+                        "content": word.content,
+                        "confidence": word.confidence,
+                        "polygon": polygon_coords,
+                        "page_number": page_number
+                    })
+            
+            # Extract lines
+            if page.lines:
+                for line in page.lines:
+                    layout_boxes.append({
+                        "type": "line",
+                        "content": line.content,
+                        "polygon": extract_polygon(line.polygon),
+                        "page_number": page_number
+                    })
+            
+            # Extract selection marks (checkboxes)
+            if page.selection_marks:
+                for mark in page.selection_marks:
+                    layout_boxes.append({
+                        "type": "selection_mark",
+                        "state": mark.state,  # "selected" or "unselected"
+                        "confidence": mark.confidence,
+                        "polygon": extract_polygon(mark.polygon),
+                        "page_number": page_number
+                    })
+            
+            # Extract tables
+            if result.tables:
+                for table_idx, table in enumerate(result.tables):
+                    # Check if table is on this page
+                    if table.bounding_regions:
+                        for region in table.bounding_regions:
+                            if region.page_number == page_number:
+                                layout_boxes.append({
+                                    "type": "table",
+                                    "table_index": table_idx,
+                                    "row_count": table.row_count,
+                                    "column_count": table.column_count,
+                                    "polygon": extract_polygon(region.polygon),
+                                    "page_number": page_number
+                                })
+                    
+                    # Extract cells
+                    for cell in table.cells:
+                        if cell.bounding_regions:
+                            for region in cell.bounding_regions:
+                                if region.page_number == page_number:
+                                    layout_boxes.append({
+                                        "type": "table_cell",
+                                        "content": cell.content,
+                                        "row_index": cell.row_index,
+                                        "column_index": cell.column_index,
+                                        "polygon": extract_polygon(region.polygon),
+                                        "page_number": page_number
+                                    })
+            
+            # Extract paragraphs with roles (titles, headers, etc.)
+            if result.paragraphs:
+                for para in result.paragraphs:
+                    if para.bounding_regions:
+                        for region in para.bounding_regions:
+                            if region.page_number == page_number:
+                                layout_boxes.append({
+                                    "type": "paragraph",
+                                    "content": para.content[:100] + "..." if len(para.content) > 100 else para.content,
+                                    "role": para.role if para.role else "text",
+                                    "polygon": extract_polygon(region.polygon),
+                                    "page_number": page_number
+                                })
+                                break  # Only first region per paragraph
+            
+        except Exception as e:
+            logger.error(f"Error extracting layout boxes: {e}", exc_info=True)
+        
+        logger.info(f"Page {page_number}: Extracted {len(layout_boxes)} total layout boxes")
+        if layout_boxes:
+            logger.debug(f"Sample box: {layout_boxes[0]}")
+        
+        return layout_boxes
+    
+    def _generate_html_from_markdown(self, markdown_text: str) -> str:
+        """Convert markdown to simple HTML."""
+        try:
+            # Simple markdown to HTML conversion
+            # Replace headers
+            html = markdown_text
+            
+            # Tables are already HTML in Azure's markdown output
+            # Just wrap in basic structure
+            html = f"<div class='ocr-content'>\n{html}\n</div>"
+            
+            return html
         except Exception as e:
             logger.warning(f"HTML generation failed: {e}")
-            return ""
+            return f"<pre>{markdown_text}</pre>"
     
     # =========================================================================
     # IMAGE PROCESSING
@@ -355,60 +400,66 @@ class OCRService:
         image: Image.Image,
         page_number: int = 1
     ) -> OCROutput:
-        """Process a single image synchronously."""
+        """Process a single image synchronously with Azure."""
         with self._semaphore:
             start_time = time.time()
             original_size = image.size
             
             try:
-                # Resize if needed for performance
-                optimized = image_preprocessor.resize_if_needed(
-                    image, 
-                    max_dimension=self.max_dimension
+                # Preprocess image for Azure
+                logger.info(f"Preprocessing image page {page_number} ({image.size})...")
+                
+                preprocessed_bytes = image_preprocessor.preprocess_for_azure(
+                    image,
+                    apply_deskew=self._apply_deskew,
+                    apply_binarize=self._apply_binarize,
+                    target_size_mb=self._target_size_mb
                 )
                 
-                # Save to temp file (PaddleOCR needs file path)
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    tmp_path = tmp.name
-                    optimized.save(tmp_path, 'PNG')
+                # Send to Azure
+                result = self._analyze_with_azure(preprocessed_bytes)
                 
-                try:
-                    logger.info(f"Processing image page {page_number} ({optimized.size})...")
-                    
-                    results = self._process_with_pipeline(tmp_path)
-                    
-                    processing_time = int((time.time() - start_time) * 1000)
-                    
-                    if results and not results[0].get('error'):
-                        result = results[0]
-                        return OCROutput(
-                            markdown=result['markdown'],
-                            html=result['html'],
-                            json_output=result['json'],
-                            processing_time_ms=processing_time,
-                            success=True,
-                            page_number=page_number,
-                            image_width=original_size[0],
-                            image_height=original_size[1],
-                            layout_boxes=result.get('layout_boxes', [])
-                        )
-                    else:
-                        error = results[0].get('error') if results else "No results"
-                        return OCROutput(
-                            success=False,
-                            error=error,
-                            processing_time_ms=processing_time,
-                            page_number=page_number,
-                            image_width=original_size[0],
-                            image_height=original_size[1]
-                        )
-                        
-                finally:
-                    # Cleanup temp file
-                    try:
-                        os.unlink(tmp_path)
-                    except:
-                        pass
+                processing_time = int((time.time() - start_time) * 1000)
+                
+                # Extract markdown (Azure returns it in result.content with Markdown format)
+                markdown_text = result.content if result.content else ""
+                
+                # Extract layout boxes for this page
+                layout_boxes = self._extract_layout_boxes(result, page_number=page_number)
+                
+                # Generate HTML
+                html_content = self._generate_html_from_markdown(markdown_text)
+                
+                # Extract page dimensions from Azure result
+                page_width_inches = 0.0
+                page_height_inches = 0.0
+                if result.pages and len(result.pages) > 0:
+                    page = result.pages[0]
+                    page_width_inches = float(page.width) if page.width else 0.0
+                    page_height_inches = float(page.height) if page.height else 0.0
+                
+                # Build JSON output summary
+                json_output = {
+                    "page_count": len(result.pages) if result.pages else 1,
+                    "words_count": sum(len(p.words) if p.words else 0 for p in result.pages) if result.pages else 0,
+                    "tables_count": len(result.tables) if result.tables else 0,
+                    "paragraphs_count": len(result.paragraphs) if result.paragraphs else 0,
+                }
+                
+                return OCROutput(
+                    markdown=markdown_text,
+                    html=html_content,
+                    json_output=json_output,
+                    processing_time_ms=processing_time,
+                    success=True,
+                    page_number=page_number,
+                    image_width=original_size[0],
+                    image_height=original_size[1],
+                    layout_boxes=layout_boxes,
+                    processed_image_bytes=preprocessed_bytes,  # Store for saving later
+                    page_width_inches=page_width_inches,
+                    page_height_inches=page_height_inches,
+                )
                 
             except Exception as e:
                 processing_time = int((time.time() - start_time) * 1000)
@@ -448,14 +499,6 @@ class OCRService:
         else:
             raise ValueError(f"Unsupported image type: {type(image_source)}")
         
-        # Preprocess image
-        image = image_preprocessor.optimize_for_ocr(
-            image,
-            apply_contrast=True,
-            apply_sharpness=True,
-            apply_denoise=False
-        )
-        
         return self._process_single_image_sync(image, page_number)
     
     # =========================================================================
@@ -466,8 +509,7 @@ class OCRService:
         """
         Process a PDF document synchronously.
         
-        PaddleOCR-VL can process PDFs directly, handling multi-page documents
-        and concatenating results automatically.
+        Azure Document Intelligence can process PDFs directly.
         
         Args:
             pdf_path: Path to PDF file
@@ -485,72 +527,67 @@ class OCRService:
                     error=f"File not found: {pdf_path}"
                 )
             
-            self._ensure_pipeline_loaded()
+            self._ensure_client_initialized()
             
             logger.info(f"Processing PDF: {pdf_path.name}")
             
-            # Process PDF directly with PaddleOCR
-            output = self._pipeline.predict(str(pdf_path))
+            # Read PDF file
+            with open(pdf_path, 'rb') as f:
+                pdf_bytes = f.read()
+            
+            # Check size and compress if needed
+            if len(pdf_bytes) > self._target_size_mb * 1024 * 1024:
+                logger.warning(f"PDF size {len(pdf_bytes)/1024/1024:.1f}MB exceeds target, processing as images")
+                return self.process_pdf_as_images_sync(pdf_path)
+            
+            # Send to Azure
+            result = self._analyze_with_azure(pdf_bytes)
             
             page_results: List[OCROutput] = []
-            markdown_list = []
             
-            page_num = 0
-            for res in output:
-                page_num += 1
-                page_start = time.time()
+            # Process each page
+            num_pages = len(result.pages) if result.pages else 1
+            
+            for page_num in range(1, num_pages + 1):
+                page = result.pages[page_num - 1] if result.pages else None
                 
-                # Extract markdown
-                md_info = res.markdown
-                markdown_text = md_info.get("markdown_text", "") if isinstance(md_info, dict) else ""
-                markdown_list.append(md_info)
+                # Get page dimensions
+                page_width = page.width if page else 0
+                page_height = page.height if page else 0
                 
-                # Extract JSON
-                json_data = res.json if hasattr(res, 'json') else {}
+                # Extract layout boxes for this page
+                layout_boxes = self._extract_layout_boxes(result, page_number=page_num)
                 
-                # Extract layout boxes
-                layout_boxes = []
-                if hasattr(res, 'json') and isinstance(res.json, dict):
-                    layout_det = res.json.get('layout_det_res', {})
-                    if isinstance(layout_det, dict):
-                        boxes = layout_det.get('boxes', [])
-                        for box in boxes:
-                            layout_boxes.append({
-                                'label': box.get('label', ''),
-                                'score': float(box.get('score', 0)),
-                                'coordinate': [float(c) for c in box.get('coordinate', [])]
-                            })
-                
-                # Generate HTML
-                html_content = self._generate_html_from_result(res)
-                
-                page_time = int((time.time() - page_start) * 1000)
+                # For multi-page PDFs, we need to split the content
+                # Azure returns combined markdown, so we use page markers or just assign to pages
+                page_markdown = f"<!-- Page {page_num} -->\n"
+                if num_pages == 1:
+                    page_markdown = result.content if result.content else ""
                 
                 page_results.append(OCROutput(
-                    markdown=markdown_text,
-                    html=html_content,
-                    json_output=json_data,
-                    processing_time_ms=page_time,
+                    markdown=page_markdown,
+                    html=self._generate_html_from_markdown(page_markdown),
+                    json_output={"page": page_num},
+                    processing_time_ms=0,  # Will sum at end
                     success=True,
                     page_number=page_num,
+                    image_width=int(page_width) if page_width else 0,
+                    image_height=int(page_height) if page_height else 0,
                     layout_boxes=layout_boxes
                 ))
-                
-                logger.info(f"  Page {page_num} processed ({page_time}ms)")
             
-            # Concatenate all markdown pages
-            combined_md = self._pipeline.concatenate_markdown_pages(markdown_list)
-            combined_html = self._combine_html(page_results)
+            # Combined markdown from Azure
+            combined_md = result.content if result.content else ""
+            combined_html = self._generate_html_from_markdown(combined_md)
             
             total_time = int((time.time() - start_time) * 1000)
-            all_success = all(p.success for p in page_results)
             
             return DocumentOCRResult(
                 pages=page_results,
                 total_pages=len(page_results),
                 total_processing_time_ms=total_time,
-                success=all_success,
-                error=None if all_success else "Some pages failed",
+                success=True,
+                error=None,
                 combined_markdown=combined_md,
                 combined_html=combined_html
             )
@@ -566,10 +603,9 @@ class OCRService:
     
     def process_pdf_as_images_sync(self, pdf_path: Union[str, Path]) -> DocumentOCRResult:
         """
-        Alternative: Process PDF by converting to images first.
+        Process PDF by converting to images first.
         
-        This can be more reliable for some PDFs but is slower.
-        Use process_pdf_sync() for better performance.
+        Used when PDF is too large for direct Azure processing.
         """
         start_time = time.time()
         
@@ -595,6 +631,11 @@ class OCRService:
             combined_md = self._combine_markdown(page_results)
             combined_html = self._combine_html(page_results)
             
+            # Combine layout boxes from all pages
+            combined_boxes = []
+            for page in page_results:
+                combined_boxes.extend(page.layout_boxes)
+            
             total_time = int((time.time() - start_time) * 1000)
             all_success = all(p.success for p in page_results)
             
@@ -605,7 +646,8 @@ class OCRService:
                 success=all_success,
                 error=None if all_success else "Some pages failed",
                 combined_markdown=combined_md,
-                combined_html=combined_html
+                combined_html=combined_html,
+                combined_layout_boxes=combined_boxes,
             )
             
         except Exception as e:
@@ -625,7 +667,7 @@ class OCRService:
         self,
         image_source: Union[str, Path, Image.Image, bytes],
         page_number: int = 1,
-        timeout: float = 900.0  # 15 min for slow CPU
+        timeout: float = 120.0  # 2 min for Azure API
     ) -> OCROutput:
         """Async wrapper for image processing."""
         try:
@@ -639,7 +681,7 @@ class OCRService:
     async def process_pdf(
         self,
         pdf_path: Union[str, Path],
-        timeout: float = 3600.0  # 1 hour for multi-page PDFs
+        timeout: float = 600.0  # 10 min for multi-page PDFs
     ) -> DocumentOCRResult:
         """Async wrapper for PDF processing."""
         try:
@@ -682,7 +724,8 @@ class OCRService:
                 success=result.success,
                 error=result.error,
                 combined_markdown=result.markdown,
-                combined_html=result.html
+                combined_html=result.html,
+                combined_layout_boxes=result.layout_boxes,
             )
         else:
             return DocumentOCRResult(success=False, error=f"Unsupported file type: {file_type}")
@@ -716,32 +759,39 @@ class OCRService:
     def get_status(self) -> Dict[str, Any]:
         """Get service status information."""
         return {
-            "model_loaded": self._model_loaded,
-            "model_name": "PaddleOCR-VL-0.9B",
-            "mode": "gpu" if self._is_gpu else "cpu",
-            "device": self._device or "not_loaded",
-            "use_layout_detection": self.use_layout_detection,
-            "use_doc_orientation_classify": self.use_doc_orientation_classify,
-            "use_doc_unwarping": self.use_doc_unwarping,
-            "use_chart_recognition": self.use_chart_recognition,
+            "client_initialized": self._client is not None,
+            "model_id": self._model_id,
+            "endpoint_configured": bool(self._endpoint),
+            "api_key_configured": bool(self._api_key),
+            "apply_deskew": self._apply_deskew,
+            "apply_binarize": self._apply_binarize,
+            "target_size_mb": self._target_size_mb,
             "max_dimension": self.max_dimension,
-            "engine": "PaddleOCR-VL"
+            "engine": "Azure Document Intelligence"
         }
     
     def preload_model(self) -> None:
-        """Preload model at startup."""
-        self._ensure_pipeline_loaded()
+        """Initialize Azure client at startup."""
+        self._ensure_client_initialized()
     
     @property
     def is_model_loaded(self) -> bool:
-        """Check if model is loaded."""
-        return self._model_loaded
+        """Check if client is initialized."""
+        return self._client is not None
     
     def cleanup(self) -> None:
         """Full cleanup."""
-        self._unload_pipeline()
+        with self._client_lock:
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except:
+                    pass
+                self._client = None
+        
         if self._executor:
             self._executor.shutdown(wait=False)
+        
         logger.info("OCR Service cleaned up")
 
 
@@ -780,7 +830,7 @@ async def ocr_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def preload_ocr_model() -> None:
-    """Preload model at startup."""
+    """Initialize Azure client at startup."""
     try:
         ocr_service.preload_model()
     except Exception as e:

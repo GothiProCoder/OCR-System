@@ -115,3 +115,47 @@ class APIClient:
             return APIClient._handle_response(response)
         except Exception as e:
             return {"error": str(e), "success": False}
+    
+    # --- Bounding Box Overlay Endpoints ---
+    
+    @staticmethod
+    def get_processed_image_url(doc_id: str, page_number: int = 1) -> str:
+        """
+        Get URL for processed image (for bounding box overlay).
+        Returns the direct URL to fetch the image.
+        """
+        return f"{API_BASE_URL}/documents/{doc_id}/processed-image/{page_number}"
+    
+    @staticmethod
+    def get_processed_image_bytes(doc_id: str, page_number: int = 1) -> Optional[bytes]:
+        """
+        Fetch processed image bytes directly.
+        Used when displaying image with Streamlit.
+        """
+        try:
+            response = requests.get(
+                f"{API_BASE_URL}/documents/{doc_id}/processed-image/{page_number}",
+                timeout=30
+            )
+            if response.status_code == 200:
+                return response.content
+            return None
+        except Exception as e:
+            st.warning(f"Failed to fetch processed image: {e}")
+            return None
+    
+    @staticmethod
+    def get_extraction_with_layout(extraction_id: str) -> Dict[str, Any]:
+        """
+        Get extraction with layout data for bounding box overlay.
+        Returns fields, layout_boxes, processed_image_paths, and page_dimensions.
+        """
+        try:
+            response = requests.get(f"{API_BASE_URL}/extractions/{extraction_id}")
+            data = APIClient._handle_response(response)
+            
+            # The extraction response already contains layout_data, processed_image_paths, etc.
+            return data
+        except Exception as e:
+            return {"error": str(e), "success": False}
+

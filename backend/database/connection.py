@@ -46,7 +46,7 @@ sync_engine = create_engine(
     max_overflow=10,
     pool_pre_ping=True,  # Verify connections before use
     pool_recycle=3600,   # Recycle connections after 1 hour
-    echo=settings.DEBUG and settings.is_development,  # SQL logging in dev
+    echo=False,  # FIX: Disable verbose SQL logging (set to True only for debugging)
 )
 
 SyncSessionLocal = sessionmaker(
@@ -96,7 +96,7 @@ async_engine = create_async_engine(
     max_overflow=10,
     pool_pre_ping=True,
     pool_recycle=3600,
-    echo=settings.DEBUG and settings.is_development,
+    echo=False,  # FIX: Disable verbose SQL logging
 )
 
 AsyncSessionLocal = async_sessionmaker(

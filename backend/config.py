@@ -69,12 +69,22 @@ class Settings(BaseSettings):
     OCR_MAX_IMAGE_DIMENSION: int = 2000
     OCR_INFERENCE_METHOD: str = "paddleocr"  # Changed from "hf" to "paddleocr"
     
-    # ===== PADDLEOCR-VL SETTINGS =====
+    # ===== PADDLEOCR-VL SETTINGS (LEGACY - kept for backup) =====
     PADDLEOCR_USE_LAYOUT_DETECTION: bool = True
     PADDLEOCR_USE_DOC_ORIENTATION: bool = False
     PADDLEOCR_USE_DOC_UNWARPING: bool = False
     PADDLEOCR_USE_CHART_RECOGNITION: bool = False
     PADDLEOCR_DEVICE: str = ""  # Empty = auto-detect, or "cpu", "gpu:0"
+    
+    # ===== AZURE DOCUMENT INTELLIGENCE =====
+    AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: str = ""
+    AZURE_DOCUMENT_INTELLIGENCE_KEY: str = ""
+    AZURE_DOCUMENT_INTELLIGENCE_MODEL: str = "prebuilt-layout"  # Options: prebuilt-layout, prebuilt-read
+    
+    # ===== PREPROCESSING SETTINGS =====
+    PREPROCESSING_APPLY_DESKEW: bool = True
+    PREPROCESSING_APPLY_BINARIZE: bool = False  # Enable for noisy forms
+    PREPROCESSING_TARGET_SIZE_MB: float = 2.0  # Azure limit is 5MB, we use 2MB for safety
     
     # ===== EXTRACTION SETTINGS =====
     CONFIDENCE_HIGH_THRESHOLD: float = 0.85

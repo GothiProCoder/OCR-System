@@ -62,8 +62,14 @@ from database.models import (
 )
 from database.connection import get_async_db
 
+# Bounding box matching utility
+from utils.bbox_matcher import BoundingBoxMatcher
+
 # Configuration
 from config import settings
+
+# File management
+from utils.file_manager import file_manager
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +143,10 @@ class OCRTaskOutput:
     processing_time_ms: int = 0
     success: bool = True
     error: Optional[str] = None
+    # Bounding box data for frontend highlighting
+    layout_boxes: List[Dict[str, Any]] = field(default_factory=list)
+    processed_images: List[bytes] = field(default_factory=list)  # Preprocessed images per page
+    page_dimensions: List[Dict[str, float]] = field(default_factory=list)  # {width, height, unit}
 
 
 @dataclass
@@ -212,12 +222,33 @@ async def run_ocr_task(file_path: str, file_type: str) -> OCRTaskOutput:
         
         logger.info(f"OCR completed: {result.total_pages} pages in {processing_time}ms")
         
+        # Extract processed images and page dimensions from pages
+        processed_images = []
+        page_dimensions = []
+        
+        for page in result.pages:
+            # Collect processed image bytes (if available)
+            if page.processed_image_bytes:
+                processed_images.append(page.processed_image_bytes)
+            
+            # Collect page dimensions
+            page_dimensions.append({
+                "page_number": page.page_number,
+                "width_inches": page.page_width_inches,
+                "height_inches": page.page_height_inches,
+                "image_width_px": page.image_width,
+                "image_height_px": page.image_height,
+            })
+        
         return OCRTaskOutput(
             markdown=result.combined_markdown,
             html=result.combined_html,
             total_pages=result.total_pages,
             processing_time_ms=processing_time,
-            success=True
+            success=True,
+            layout_boxes=result.combined_layout_boxes,
+            processed_images=processed_images,
+            page_dimensions=page_dimensions,
         )
         
     except Exception as e:
@@ -231,7 +262,6 @@ async def run_ocr_task(file_path: str, file_type: str) -> OCRTaskOutput:
         )
 
 
-@task(retry=gemini_retry_policy)
 def run_gemini_extraction_task(
     ocr_text: str,
     custom_prompt: Optional[str] = None,
@@ -331,9 +361,47 @@ async def save_extraction_to_database(
     Returns:
         Extraction UUID if successful, None otherwise
     """
+    logger.info(f"=== SAVING EXTRACTION TO DATABASE ===")
+    logger.info(f"Document ID: {document_id}")
+    logger.info(f"Layout boxes count: {len(ocr_output.layout_boxes) if ocr_output.layout_boxes else 0}")
+    logger.info(f"Processed images count: {len(ocr_output.processed_images) if ocr_output.processed_images else 0}")
+    logger.info(f"Page dimensions count: {len(ocr_output.page_dimensions) if ocr_output.page_dimensions else 0}")
+    
     try:
         async with get_async_db() as db:
-            # Create new extraction version
+            # Save processed images to disk and build paths dict
+            processed_image_paths = {}
+            if ocr_output.processed_images:
+                doc_id_str = str(document_id)
+                for page_num, img_bytes in enumerate(ocr_output.processed_images, start=1):
+                    try:
+                        _, rel_path = file_manager.save_processed_image(
+                            img_bytes, 
+                            doc_id_str, 
+                            page_number=page_num
+                        )
+                        processed_image_paths[str(page_num)] = rel_path
+                        logger.info(f"Saved processed image page {page_num}: {rel_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save processed image page {page_num}: {e}")
+            
+            # Build page dimensions dict
+            page_dimensions_dict = {}
+            for dim in ocr_output.page_dimensions:
+                page_num = dim.get("page_number", 1)
+                page_dimensions_dict[str(page_num)] = {
+                    "width_inches": dim.get("width_inches", 0),
+                    "height_inches": dim.get("height_inches", 0),
+                    "image_width_px": dim.get("image_width_px", 0),
+                    "image_height_px": dim.get("image_height_px", 0),
+                }
+            
+            logger.info(f"Prepared data for DB:")
+            logger.info(f"  - processed_image_paths: {processed_image_paths}")
+            logger.info(f"  - page_dimensions_dict keys: {list(page_dimensions_dict.keys())}")
+            logger.info(f"  - layout_boxes sample (first 2): {ocr_output.layout_boxes[:2] if ocr_output.layout_boxes else 'None'}")
+            
+            # Create new extraction version with bounding box data
             extraction = await extraction_crud.create_new_version(
                 db,
                 document_id=document_id,
@@ -346,19 +414,53 @@ async def save_extraction_to_database(
                 processing_time_ms=total_time_ms,
                 status="completed",
                 total_fields=len(gemini_output.fields),
-                confidence_avg=_calculate_avg_confidence(gemini_output.fields)
+                confidence_avg=_calculate_avg_confidence(gemini_output.fields),
+                # Bounding box data
+                layout_data=ocr_output.layout_boxes,
+                processed_image_paths=processed_image_paths,
+                page_dimensions=page_dimensions_dict,
             )
             
-            # Prepare fields for bulk insert
+            logger.info(f"✅ Extraction created with ID: {extraction.id}")
+            logger.info(f"   Saved layout_data count: {len(extraction.layout_data) if extraction.layout_data else 0}")
+            logger.info(f"   Saved processed_image_paths: {extraction.processed_image_paths}")
+            logger.info(f"   Saved page_dimensions: {extraction.page_dimensions}")
+            
+            # Prepare fields for bulk insert with bounding box matching
+            # Initialize bbox matcher with OCR layout data
+            bbox_matcher = BoundingBoxMatcher(ocr_output.layout_boxes)
+            logger.info(f"   BoundingBoxMatcher initialized with {len(ocr_output.layout_boxes)} layout boxes")
+            
             fields_data = []
             for i, field_data in enumerate(gemini_output.fields):
+                field_key = field_data.get("field_key", f"field_{i}")
+                field_value = field_data.get("field_value", "")
+                
+                # Match bounding boxes for KEY and VALUE
+                key_bbox, value_bbox = bbox_matcher.find_key_value_pair(
+                    field_key, 
+                    field_value
+                )
+                
                 fields_data.append({
-                    "field_key": field_data.get("field_key", f"field_{i}"),
-                    "field_value": field_data.get("field_value", ""),
+                    "field_key": field_key,
+                    "field_value": field_value,
                     "field_type": _map_field_type(field_data.get("field_type", "text")),
                     "confidence": field_data.get("confidence", 0.85),
-                    "sort_order": i
+                    # Bounding box data for highlighting
+                    "key_bbox": key_bbox,
+                    "value_bbox": value_bbox,
+                    "original_ocr_text": field_value,  # Preserve for edit resilience
+                    # Note: sort_order is added by bulk_create based on index
                 })
+                
+                # Log matching results for debugging
+                if key_bbox:
+                    logger.debug(f"   Field '{field_key}': key_bbox matched with conf={key_bbox.get('confidence', 0):.2f}")
+                if value_bbox:
+                    logger.debug(f"   Field '{field_key}': value_bbox matched with conf={value_bbox.get('confidence', 0):.2f}")
+            
+            logger.info(f"   Prepared {len(fields_data)} fields with bounding box matching")
             
             # Bulk create fields
             if fields_data:
@@ -378,7 +480,7 @@ async def save_extraction_to_database(
             
             await db.commit()
             
-            logger.info(f"Saved extraction {extraction.id} with {len(fields_data)} fields")
+            logger.info(f"Saved extraction {extraction.id} with {len(fields_data)} fields and {len(processed_image_paths)} processed images")
             return extraction.id
             
     except Exception as e:
@@ -550,9 +652,10 @@ async def extraction_workflow(inputs: Dict[str, Any]) -> Dict[str, Any]:
             message="Starting LLM extraction"
         )
         
-        # Run Gemini extraction task (sync function, run in thread for non-blocking)
-        gemini_output: GeminiTaskOutput = await asyncio.to_thread(
-            run_gemini_extraction_task,
+        # Run Gemini extraction task
+        # Note: This is a sync function, but since we're in a LangGraph entrypoint,
+        # we can call it directly - the task decorator handles execution
+        gemini_output: GeminiTaskOutput = run_gemini_extraction_task(
             ocr_output.markdown,
             custom_prompt,
             form_template
