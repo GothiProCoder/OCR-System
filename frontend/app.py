@@ -1,5 +1,11 @@
+"""
+Frontend Application Entry Point
+================================
+Main Streamlit application with page routing and global configuration.
+"""
 
 import streamlit as st
+from pathlib import Path
 from utils.state import StateManager
 from utils.helpers import load_css
 from assets.icons import Icons
@@ -7,7 +13,7 @@ from assets.icons import Icons
 # --- Page Config (Must be the very first Streamlit command) ---
 st.set_page_config(
     page_title="Lumina OCR",
-    page_icon="⚡", # Browser tab icon can remain emoji/favicon, or use a local image path if strictly needed (keeping emoji for tab for now as it's standard)
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
@@ -17,13 +23,20 @@ st.set_page_config(
     }
 )
 
+# Get the directory of this file for relative path resolution
+FRONTEND_DIR = Path(__file__).parent
+
+
 # --- Initialization ---
-def main():
+def main() -> None:
+    """Initialize and run the main application."""
     # 1. Initialize State
     StateManager.init_state()
 
-    # 2. Load Global CSS
-    load_css("frontend/assets/styles.css")
+    # 2. Load Global CSS (using absolute path for reliability)
+    css_path = FRONTEND_DIR / "assets" / "styles.css"
+    load_css(str(css_path))
+
 
     # 3. Sidebar Header
     with st.sidebar:

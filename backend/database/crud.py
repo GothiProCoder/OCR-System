@@ -19,7 +19,7 @@ from sqlalchemy import select, update, delete, func, and_, or_
 from sqlalchemy.orm import Session, selectinload, joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional, Dict, Any, TypeVar, Generic, Type
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 import logging
 
@@ -219,7 +219,7 @@ class DocumentCRUD(BaseCRUD[Document]):
         result = await db.execute(
             update(Document)
             .where(Document.id == id)
-            .values(is_deleted=True, deleted_at=datetime.utcnow())
+            .values(is_deleted=True, deleted_at=datetime.now(timezone.utc))
         )
         return result.rowcount > 0
     
@@ -400,7 +400,7 @@ class ExtractionCRUD(BaseCRUD[Extraction]):
         return await self.update(
             db, id, 
             is_finalized=True, 
-            finalized_at=datetime.utcnow()
+            finalized_at=datetime.now(timezone.utc)
         )
     
     async def update_stats(
@@ -514,7 +514,7 @@ class ExtractedFieldCRUD(BaseCRUD[ExtractedField]):
         # Update field
         field.field_value = new_value
         field.is_edited = True
-        field.updated_at = datetime.utcnow()
+        field.updated_at = datetime.now(timezone.utc)
         
         # Create edit record
         edit = FieldEdit(

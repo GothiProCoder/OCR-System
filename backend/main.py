@@ -90,6 +90,34 @@ async def lifespan(app: FastAPI):
 
 
 # =============================================================================
+# OPENAPI TAGS DOCUMENTATION
+# =============================================================================
+
+tags_metadata = [
+    {
+        "name": "Health",
+        "description": "Health check and system status endpoints.",
+    },
+    {
+        "name": "Documents",
+        "description": "Upload, list, retrieve, and delete documents. Supports PNG, JPG, JPEG, and PDF formats.",
+    },
+    {
+        "name": "Extractions",
+        "description": "OCR extraction operations including starting extraction, retrieving results, and updating fields.",
+    },
+    {
+        "name": "Exports",
+        "description": "Export extracted data to various formats: Excel, JSON, CSV, PDF.",
+    },
+    {
+        "name": "Statistics",
+        "description": "Dashboard statistics and analytics endpoints.",
+    },
+]
+
+
+# =============================================================================
 # APPLICATION INSTANCE
 # =============================================================================
 
@@ -102,9 +130,9 @@ app = FastAPI(
     
     ### Features
     - **Upload** documents (PNG, JPG, PDF)
-    - **Extract** data with Chandra OCR + Gemini AI
+    - **Extract** data with Azure Document Intelligence + Gemini AI
     - **Edit** extracted fields with confidence indicators
-    - **Export** to Excel, JSON, PDF
+    - **Export** to Excel, JSON, CSV, PDF
     
     ### Workflow
     1. Upload a document
@@ -112,11 +140,17 @@ app = FastAPI(
     3. Review and edit extracted fields
     4. Finalize and save to database
     5. Export data in your preferred format
+    
+    ### Rate Limits
+    - General API: 60 requests/minute
+    - OCR endpoints: 20 requests/minute
+    - LLM endpoints: 30 requests/minute
     """,
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    openapi_tags=tags_metadata,
     lifespan=lifespan,
 )
 
@@ -133,6 +167,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rate Limiting Middleware (60 requests per minute per client)
+try:
+    from utils.rate_limit import RateLimitMiddleware
+    app.add_middleware(
+        RateLimitMiddleware,
+        requests_per_minute=60,
+        requests_per_hour=1000,
+        exclude_paths=["/health", "/docs", "/redoc", "/openapi.json", "/"]
+    )
+    logger.info("✅ Rate limiting middleware enabled")
+except ImportError:
+    logger.warning("⚠️ Rate limiting middleware not available")
 
 
 # Request timing middleware

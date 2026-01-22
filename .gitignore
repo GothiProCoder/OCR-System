@@ -92,3 +92,5 @@ output
 
 test_*.py
 OCR-System.code-workspace
+
+.agent

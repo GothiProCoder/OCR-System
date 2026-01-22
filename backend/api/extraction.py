@@ -31,7 +31,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 # Database
@@ -619,7 +619,7 @@ async def finalize_extraction(
         return FinalizationResponse(
             extraction_id=extraction.id,
             is_finalized=True,
-            finalized_at=finalized.finalized_at or datetime.utcnow(),
+            finalized_at=finalized.finalized_at or datetime.now(timezone.utc),
             message="Extraction finalized successfully"
         )
         

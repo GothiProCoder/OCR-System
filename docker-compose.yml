@@ -1,4 +1,5 @@
-version: '3.8'
+# Note: The 'version' key is obsolete in Docker Compose V2+ and has been removed.
+# Docker Compose now automatically infers the correct specification version.
 
 # ============================================
 # OCR Form Extraction System - Docker Compose
@@ -28,7 +29,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-ocr_system}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-ocr_system}",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -52,7 +57,7 @@ services:
       postgres:
         condition: service_healthy
     profiles:
-      - tools  # Only starts with: docker-compose --profile tools up
+      - tools # Only starts with: docker-compose --profile tools up
 
 volumes:
   postgres_data:

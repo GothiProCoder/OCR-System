@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, Dict, Any
 from uuid import UUID
 from pathlib import Path as FilePath
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 # Database
@@ -133,7 +133,7 @@ def result_to_response(result: ExportResult) -> ExportResponse:
         file_size_bytes=result.file_size_bytes,
         download_url=result.download_url or f"/api/exports/{result.export_id}/download",
         expires_at=None,  # Could implement expiration
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         message="Export generated successfully" if result.success else (result.error or "Export failed")
     )
 

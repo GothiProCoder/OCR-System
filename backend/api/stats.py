@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, text
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 # Database
@@ -72,7 +72,7 @@ def get_date_range(period: str) -> tuple[datetime, datetime]:
     Returns:
         Tuple of (start_datetime, end_datetime)
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     end = now
     
     if period == "today":
@@ -144,7 +144,7 @@ async def get_dashboard_stats(
     )
     
     # Documents today
-    today_start = datetime(datetime.utcnow().year, datetime.utcnow().month, datetime.utcnow().day)
+    today_start = datetime(datetime.now(timezone.utc).year, datetime.now(timezone.utc).month, datetime.now(timezone.utc).day, tzinfo=timezone.utc)
     docs_today = await db.execute(
         select(func.count())
         .select_from(Document)
@@ -219,7 +219,7 @@ async def get_dashboard_stats(
     
     return {
         "period": period,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         
         # Document metrics
         "documents": {
@@ -281,8 +281,9 @@ async def get_document_stats(
     stats = await document_crud.get_stats(db)
     
     # Additional calculations
-    today_start = datetime(datetime.utcnow().year, datetime.utcnow().month, datetime.utcnow().day)
-    week_start = datetime.utcnow() - timedelta(days=7)
+    now_utc = datetime.now(timezone.utc)
+    today_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+    week_start = now_utc - timedelta(days=7)
     
     docs_today = await db.execute(
         select(func.count())
@@ -598,5 +599,5 @@ async def get_system_overview(
             "gemini": "configured" if gemini_configured else "not_configured"
         },
         
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
