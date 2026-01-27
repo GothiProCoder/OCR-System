@@ -85,7 +85,6 @@ Knowledge Base
 tests
 .model_offload
 COMPLETE_OCR_SERVICE_ANALYSIS.txt
-*.md
 storage
 .venv_paddleocr
 output
@@ -94,3 +93,7 @@ test_*.py
 OCR-System.code-workspace
 
 .agent
+.shared
+setup_paddleocr.ps1
+PROJECT_DOCUMENTATION.md
+AGENT.md
