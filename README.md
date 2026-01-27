@@ -7,11 +7,11 @@
 
 <!-- Badges -->
 <p align="center">
-  <a href="https://github.com/GothiProCoder/OCR-System/actions">
-    <img src="https://img.shields.io/github/actions/workflow/status/GothiProCoder/OCR-System/ci.yml?style=flat-square&logo=github&label=Build" alt="Build Status">
+  <a href="https://github.com/GothiProCoder/OCR-System/releases">
+    <img src="https://img.shields.io/badge/Version-V69%F0%9F%98%8F-blue?style=flat-square" alt="Version">
   </a>
   <a href="https://github.com/GothiProCoder/OCR-System/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/GothiProCoder/OCR-System?style=flat-square&color=blue" alt="License">
+    <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License">
   </a>
   <a href="https://www.python.org/">
     <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python Version">
@@ -28,8 +28,6 @@
   <strong>Effortless Data Extraction from Complex Forms using Azure AI & Google Gemini 2.5</strong>
   <br />
   <br />
-  <a href="#demo">View Demo</a>
-  ·
   <a href="https://github.com/GothiProCoder/OCR-System/issues">Report Bug</a>
   ·
   <a href="https://github.com/GothiProCoder/OCR-System/issues">Request Feature</a>
@@ -73,15 +71,15 @@ Most OCR tools just give you raw text. Lumina gives you **intelligence**:
 
 <p align="right">(<a href="#readme-top">↑ top</a>)</p>
 
+<!--
 ## 🎬 Demo
 
 <div align="center">
-  <!-- PLACEHOLDER FOR DEMO GIF -->
-  <!-- Suggested: Record a 15s clip showing Upload -> Processing -> Review Page -->
   <img src="https://via.placeholder.com/800x450.png?text=Lumina+OCR+Demo+GIF+(Coming+Soon)" alt="Lumina Demo" width="100%">
 </div>
 
 <p align="right">(<a href="#readme-top">↑ top</a>)</p>
+-->
 
 ## 🏗 Architecture
 
